@@ -250,6 +250,18 @@ components:
           default: false
           description: If true and the synthesize flag is enabled, the LLM produces a synthesis stored as a note
       required: [query]
+    ContextHit:
+      type: object
+      properties:
+        note:
+          $ref: "#/components/schemas/Note"
+        score:
+          type: number
+        via:
+          type: string
+          enum: [direct, related]
+          description: "direct: matched by retriever; related: pulled in via note_links or shared entities"
+      required: [note, score, via]
     BuildContextResponse:
       type: object
       properties:
@@ -261,7 +273,7 @@ components:
         hits:
           type: array
           items:
-            $ref: "#/components/schemas/SearchHit"
+            $ref: "#/components/schemas/ContextHit"
         bundleMarkdown:
           type: string
           description: Concatenated markdown of the selected notes, ready to feed to an agent

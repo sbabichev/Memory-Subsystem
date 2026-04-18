@@ -92,10 +92,27 @@ export interface BuildContextRequest {
   synthesize?: boolean;
 }
 
+/**
+ * direct: matched by retriever; related: pulled in via note_links or shared entities
+ */
+export type ContextHitVia = (typeof ContextHitVia)[keyof typeof ContextHitVia];
+
+export const ContextHitVia = {
+  direct: "direct",
+  related: "related",
+} as const;
+
+export interface ContextHit {
+  note: Note;
+  score: number;
+  /** direct: matched by retriever; related: pulled in via note_links or shared entities */
+  via: ContextHitVia;
+}
+
 export interface BuildContextResponse {
   query: string;
   interpretedQuery?: string | null;
-  hits: SearchHit[];
+  hits: ContextHit[];
   /** Concatenated markdown of the selected notes, ready to feed to an agent */
   bundleMarkdown: string;
   synthesisNote?: Note | null;

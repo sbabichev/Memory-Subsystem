@@ -39,6 +39,7 @@ export const notes = pgTable(
     sourceItemId: uuid("source_item_id").references(() => rawItems.id, {
       onDelete: "set null",
     }),
+    markdownPath: text("markdown_path"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     searchVector: tsvector("search_vector").generatedAlwaysAs(
       sql`to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'') || ' ' || coalesce(summary,''))`,
@@ -101,3 +102,11 @@ export const noteLinks = pgTable(
 export type RawItem = typeof rawItems.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type Entity = typeof entities.$inferSelect;
+
+import { createInsertSchema } from "drizzle-zod";
+
+export const insertRawItemSchema = createInsertSchema(rawItems);
+export const insertNoteSchema = createInsertSchema(notes);
+export const insertEntitySchema = createInsertSchema(entities);
+export const insertNoteEntitySchema = createInsertSchema(noteEntities);
+export const insertNoteLinkSchema = createInsertSchema(noteLinks);

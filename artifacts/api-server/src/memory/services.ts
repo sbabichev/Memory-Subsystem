@@ -7,6 +7,7 @@ import {
   insertNote,
   insertRawItem,
   linkNoteEntities,
+  setNoteMarkdownPath,
   upsertEntities,
   type NoteWithEntities,
 } from "./repository";
@@ -76,7 +77,10 @@ export async function ingestText(input: {
 
   // Markdown export is best-effort and outside the transaction.
   for (const n of persisted.notes) {
-    await writeNoteMarkdown(n);
+    const mdPath = await writeNoteMarkdown(n);
+    if (mdPath) {
+      await setNoteMarkdownPath(n.id, mdPath);
+    }
   }
 
   return {
@@ -182,7 +186,8 @@ export async function buildContext(input: {
         createdAt: inserted.createdAt,
         entities: [],
       };
-      await writeNoteMarkdown(full);
+      const synPath = await writeNoteMarkdown(full);
+      if (synPath) await setNoteMarkdownPath(full.id, synPath);
       synthesisNote = serializeNote(full);
     }
   }

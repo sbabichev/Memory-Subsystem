@@ -35,12 +35,17 @@ export function noteToMarkdown(note: NoteWithEntities): string {
   return fm.join("\n");
 }
 
-export async function writeNoteMarkdown(note: NoteWithEntities): Promise<void> {
+export async function writeNoteMarkdown(
+  note: NoteWithEntities,
+): Promise<string | null> {
   try {
     await fs.mkdir(MD_DIR, { recursive: true });
-    await fs.writeFile(path.join(MD_DIR, safeFilename(note)), noteToMarkdown(note), "utf8");
+    const filename = safeFilename(note);
+    await fs.writeFile(path.join(MD_DIR, filename), noteToMarkdown(note), "utf8");
+    return path.join(path.relative(process.cwd(), MD_DIR), filename);
   } catch (err) {
     logger.warn({ err, noteId: note.id }, "Failed to write markdown export");
+    return null;
   }
 }
 

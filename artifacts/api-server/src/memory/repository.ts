@@ -45,6 +45,7 @@ export async function insertNote(
     tags: string[];
     sourceItemId?: string | null;
     metadata?: Record<string, unknown>;
+    markdownPath?: string | null;
   },
 ) {
   const [row] = await tx
@@ -57,9 +58,17 @@ export async function insertNote(
       tags: input.tags,
       sourceItemId: input.sourceItemId ?? null,
       metadata: input.metadata ?? {},
+      markdownPath: input.markdownPath ?? null,
     })
     .returning();
   return row;
+}
+
+export async function setNoteMarkdownPath(
+  noteId: string,
+  markdownPath: string,
+): Promise<void> {
+  await db.update(notes).set({ markdownPath }).where(eq(notes.id, noteId));
 }
 
 export async function upsertEntities(

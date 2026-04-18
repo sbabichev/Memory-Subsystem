@@ -230,6 +230,11 @@ export const BuildContextResponse = zod.object({
         ),
       }),
       score: zod.number(),
+      via: zod
+        .enum(["direct", "related"])
+        .describe(
+          "direct: matched by retriever; related: pulled in via note_links or shared entities",
+        ),
     }),
   ),
   bundleMarkdown: zod

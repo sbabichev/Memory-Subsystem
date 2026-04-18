@@ -8,6 +8,8 @@
 
 export * from "./buildContextRequest";
 export * from "./buildContextResponse";
+export * from "./contextHit";
+export * from "./contextHitVia";
 export * from "./entity";
 export * from "./errorResponse";
 export * from "./healthStatus";

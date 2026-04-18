@@ -5,13 +5,13 @@
  * Memory Subsystem API
  * OpenAPI spec version: 0.1.0
  */
+import type { ContextHit } from "./contextHit";
 import type { Note } from "./note";
-import type { SearchHit } from "./searchHit";
 
 export interface BuildContextResponse {
   query: string;
   interpretedQuery?: string | null;
-  hits: SearchHit[];
+  hits: ContextHit[];
   /** Concatenated markdown of the selected notes, ready to feed to an agent */
   bundleMarkdown: string;
   synthesisNote?: Note | null;
