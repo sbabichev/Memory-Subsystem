@@ -1,0 +1,99 @@
+You are helping build a prototype of a Memory Subsystem for an AI-oriented architecture.
+
+Project goal:
+Build a modular memory subsystem that can ingest user data, organize it, retrieve relevant knowledge, and support an external broker agent called "Archivist".
+
+Core product idea:
+This is not just a RAG app. This is a memory subsystem for AI and humans.
+It should support:
+1. ingesting raw inputs (notes, text, URLs, files later),
+2. transforming them into structured memory objects,
+3. storing both canonical content and metadata,
+4. retrieving relevant memory efficiently,
+5. exposing clean APIs for an external agent layer.
+
+Architectural principles:
+- Keep the design modular and simple.
+- Avoid premature microservices.
+- Prefer a clean monolith first.
+- Use LLMs where they add real semantic value:
+  - query interpretation
+  - note classification
+  - entity extraction
+  - synthesis
+- Do not over-optimize for token savings at the expense of product quality.
+- Still keep boundaries clear between:
+  - broker/orchestration logic
+  - memory logic
+  - persistence logic
+  - LLM integration logic
+
+Initial architecture:
+- FastAPI backend
+- PostgreSQL as main database
+- pgvector optional or pluggable
+- SQLAlchemy or SQLModel
+- Pydantic models
+- Alembic migrations
+- Local filesystem storage for canonical markdown files
+- Simple service layer
+- No unnecessary async complexity unless useful
+
+Main domain objects:
+- RawItem
+- Note
+- Entity
+- NoteLink
+- Synthesis
+
+Minimal note types:
+- raw_source
+- note
+- insight
+- decision
+- synthesis
+- entity
+
+Responsibilities of the memory subsystem:
+- ingest content
+- normalize content
+- classify memory objects
+- extract entities
+- save notes and metadata
+- retrieve relevant notes
+- fetch related notes
+- prepare compact context for an external caller
+
+Out of scope for v1:
+- multi-tenant SaaS complexity
+- advanced auth
+- distributed orchestration
+- autonomous agents
+- complex UI
+- full production observability stack
+
+Code quality requirements:
+- Use clear folder structure
+- Write strongly typed Python code
+- Separate routers, services, repositories, schemas, and models
+- Keep functions small and explicit
+- Add docstrings for service methods
+- Add TODO markers only where needed
+- Prefer readable code over clever code
+
+API goals for v1:
+- POST /ingest/text
+- GET /notes/{id}
+- POST /search
+- POST /context/build
+
+Expected behavior:
+- Build the system incrementally
+- Propose minimal implementations first
+- Do not generate huge speculative systems
+- When adding a new part, explain how it fits the architecture
+
+When uncertain:
+- choose the simpler design
+- preserve modularity
+- optimize for future extensibility without overengineering

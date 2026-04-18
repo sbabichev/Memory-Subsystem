@@ -1,0 +1,101 @@
+План хорошо фиксирует ядро:
+
+text-only ingest
+4 простых API
+pluggable retriever
+один LLMClient abstraction
+inspector UI для ручной проверки loop’а
+markdown как canonical storage, Postgres как structured layer.
+
+Это сильная комбинация, потому что у тебя есть и инженерная прозрачность, и задел на будущий продукт. Особенно удачно, что semantic search отложен, но интерфейс под него уже предусмотрен. Это правильный компромисс для v1.
+
+Теперь критика.
+
+1. LLM на слишком многих шагах в v1
+Сейчас LLM сидит в:
+
+classification
+entity extraction
+query interpretation
+synthesis.
+
+Для архитектуры это красиво, но для первого цикла может быть лишним. Я бы оставил обязательными только:
+
+classification
+entity extraction
+
+А вот:
+
+interpretQuery
+synthesize
+сделал бы optional mode, не обязательным для каждого запроса. Иначе ты слишком рано начнёшь зависеть от качества и поведения модели.
+
+2. Markdown body вне БД, snippet в БД
+Это нормально, но есть нюанс. В плане написано, что full-text поиск должен идти по title/snippet/body. При этом body живёт в markdown-файле.
+
+Тут есть архитектурная нестыковка:
+либо:
+
+body надо дублировать в БД для FTS,
+либо:
+индексировать отдельно,
+либо:
+искать только по snippet/title на v1.
+
+Я бы для v1 сделал просто:
+
+body_md хранить и в markdown, и в БД
+markdown считать canonical export/view layer, а не единственным местом full body
+
+Это сильно упростит поиск, дебаг и контекст-билдинг.
+
+3. Retriever.related и note_links одновременно
+Сейчас related notes предлагается получать и через Retriever, и через note_links.
+Тут есть риск дублирования двух механизмов “связанности”.
+
+Для v1 я бы жёстко разделил:
+
+Retriever.search() → найти seed notes
+note_links → явные связи
+Retriever.related() пока можно не делать, либо сделать простым thin wrapper над linked notes / shared entities
+
+Иначе появится слишком много полускрытой магии.
+
+4. Слишком рано делать inspector UI как полноценный артефакт
+UI полезен, но это не должен быть второй проект внутри проекта. В плане пока это звучит ок, но держи дисциплину:
+UI должен быть тестовой панелью, а не маленьким продуктом.
+
+5. Слишком широкий “Done looks like”
+Он хороший как vision, но для реального MVP я бы мысленно сузил критерий успеха до этого:
+
+пользователь вставил текст → система сохранила note → показала тип и entities → поиск нашёл note → context builder вернул нормальный bundle.
+
+Всё. Если это работает хорошо, v1 уже успешен.
+
+Что бы я изменил прямо в плане.
+
+Сильно рекомендую поправить 3 вещи
+
+Изменение 1
+В шаге про persistence заменить идею:
+
+“DB holds metadata + short snippet; full body lives in markdown file”
+
+на:
+
+“DB holds metadata + full body for search/runtime, markdown file is the canonical human-readable artifact”
+
+Это снимет много трения.
+
+Изменение 2
+В шаге про LLM client записать:
+
+query interpretation and synthesis are optional and can be disabled via config in v1
+
+Это даст тебе более устойчивый старт.
+
+Изменение 3
+В шаге про retrieval упростить:
+
+search() оставить
+related() либо упростить до shared entities / note_links, либо отложить расширенную версию
