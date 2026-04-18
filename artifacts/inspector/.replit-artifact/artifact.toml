@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Memory Inspector"
+version = "1.0.0"
+id = "artifacts/inspector"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22578
+
+[services.development]
+run = "pnpm --filter @workspace/inspector run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/inspector", "run", "build" ]
+publicDir = "artifacts/inspector/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22578"
+BASE_PATH = "/"

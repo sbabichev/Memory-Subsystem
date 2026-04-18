@@ -3,20 +3,27 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Memory Subsystem API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: ingest
+    description: Ingest raw text into the memory
+  - name: notes
+    description: Read structured notes
+  - name: search
+    description: Search structured notes
+  - name: context
+    description: Build context bundles for downstream agents
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +31,84 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /ingest/text:
+    post:
+      operationId: ingestText
+      tags: [ingest]
+      summary: Ingest a raw text item and produce one or more structured notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestTextRequest"
+      responses:
+        "200":
+          description: Notes produced from the raw item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestTextResponse"
+  /notes/{id}:
+    get:
+      operationId: getNote
+      tags: [notes]
+      summary: Get a single note by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /search:
+    post:
+      operationId: searchNotes
+      tags: [search]
+      summary: Search structured notes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+  /context/build:
+    post:
+      operationId: buildContext
+      tags: [context]
+      summary: Build a context bundle for a downstream agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BuildContextRequest"
+      responses:
+        "200":
+          description: Context bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildContextResponse"
 components:
   schemas:
     HealthStatus:
@@ -31,6 +116,156 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
-
+      required: [status]
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    NoteType:
+      type: string
+      enum: [raw_source, note, insight, decision, synthesis, entity]
+    Entity:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          description: e.g. person, project, concept, place, organization
+        name:
+          type: string
+      required: [id, type, name]
+    Note:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/NoteType"
+        title:
+          type: string
+        body:
+          type: string
+        summary:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        sourceItemId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entity"
+      required: [id, type, title, body, tags, createdAt, entities]
+    IngestTextRequest:
+      type: object
+      properties:
+        text:
+          type: string
+          minLength: 1
+        source:
+          type: string
+          nullable: true
+          description: Optional free-form label of the source (e.g. "chat", "email")
+        author:
+          type: string
+          nullable: true
+      required: [text]
+    IngestTextResponse:
+      type: object
+      properties:
+        rawItemId:
+          type: string
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Note"
+      required: [rawItemId, notes]
+    SearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        types:
+          type: array
+          items:
+            $ref: "#/components/schemas/NoteType"
+          nullable: true
+      required: [query]
+    SearchHit:
+      type: object
+      properties:
+        note:
+          $ref: "#/components/schemas/Note"
+        score:
+          type: number
+      required: [note, score]
+    SearchResponse:
+      type: object
+      properties:
+        query:
+          type: string
+        interpretedQuery:
+          type: string
+          nullable: true
+          description: LLM-rewritten query, when the interpret-query flag is enabled
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchHit"
+      required: [query, hits]
+    BuildContextRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 8
+        types:
+          type: array
+          items:
+            $ref: "#/components/schemas/NoteType"
+          nullable: true
+        synthesize:
+          type: boolean
+          default: false
+          description: If true and the synthesize flag is enabled, the LLM produces a synthesis stored as a note
+      required: [query]
+    BuildContextResponse:
+      type: object
+      properties:
+        query:
+          type: string
+        interpretedQuery:
+          type: string
+          nullable: true
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchHit"
+        bundleMarkdown:
+          type: string
+          description: Concatenated markdown of the selected notes, ready to feed to an agent
+        synthesisNote:
+          $ref: "#/components/schemas/Note"
+          nullable: true
+      required: [query, hits, bundleMarkdown]
