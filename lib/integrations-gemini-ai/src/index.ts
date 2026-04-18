@@ -1,1 +1,1 @@
-export { ai } from "./client";
+export { getAi, isGeminiConfigured } from "./client";

@@ -1,5 +1,12 @@
-import { db, rawItems, notes, entities, noteEntities } from "@workspace/db";
-import { and, eq, inArray, sql, desc } from "drizzle-orm";
+import {
+  db,
+  rawItems,
+  notes,
+  entities,
+  noteEntities,
+  noteLinks,
+} from "@workspace/db";
+import { and, eq, inArray, ne, or, sql, desc } from "drizzle-orm";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Executor = typeof db | Tx;
@@ -155,6 +162,64 @@ export async function getNotesByIds(ids: string[]): Promise<NoteWithEntities[]> 
   if (ids.length === 0) return [];
   const rows = await db.select().from(notes).where(inArray(notes.id, ids));
   return attachEntities(rows);
+}
+
+export async function findRelatedNoteIds(
+  seedNoteIds: string[],
+  opts: { limit: number },
+): Promise<string[]> {
+  if (seedNoteIds.length === 0) return [];
+
+  // 1. Notes connected via explicit note_links (either direction).
+  const linkRows = await db
+    .select({
+      from: noteLinks.fromNoteId,
+      to: noteLinks.toNoteId,
+    })
+    .from(noteLinks)
+    .where(
+      or(
+        inArray(noteLinks.fromNoteId, seedNoteIds),
+        inArray(noteLinks.toNoteId, seedNoteIds),
+      ),
+    );
+  const linked = new Set<string>();
+  for (const r of linkRows) {
+    if (!seedNoteIds.includes(r.from)) linked.add(r.from);
+    if (!seedNoteIds.includes(r.to)) linked.add(r.to);
+  }
+
+  // 2. Notes that share at least one entity with the seed set.
+  const seedEntityRows = await db
+    .select({ entityId: noteEntities.entityId })
+    .from(noteEntities)
+    .where(inArray(noteEntities.noteId, seedNoteIds));
+  const entityIds = Array.from(new Set(seedEntityRows.map((r) => r.entityId)));
+
+  if (entityIds.length > 0) {
+    const sharedRows = await db
+      .select({
+        noteId: noteEntities.noteId,
+        cnt: sql<number>`count(*)`.as("cnt"),
+      })
+      .from(noteEntities)
+      .where(
+        and(
+          inArray(noteEntities.entityId, entityIds),
+          sql`${noteEntities.noteId} <> ALL(${sql.raw(
+            `ARRAY[${seedNoteIds.map((id) => `'${id}'::uuid`).join(",")}]`,
+          )})`,
+        ),
+      )
+      .groupBy(noteEntities.noteId)
+      .orderBy(desc(sql`cnt`))
+      .limit(opts.limit * 2);
+    for (const r of sharedRows) {
+      linked.add(r.noteId);
+    }
+  }
+
+  return Array.from(linked).slice(0, opts.limit);
 }
 
 export type SearchHitRow = { note: NoteWithEntities; score: number };

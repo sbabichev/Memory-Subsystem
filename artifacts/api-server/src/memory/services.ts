@@ -1,19 +1,16 @@
-import {
-  classifyNotes,
-  extractEntities,
-  interpretQuery,
-  synthesize,
-} from "./llm";
+import { getLLMClient } from "./llm";
 import {
   db,
-  ftsSearch,
   getNoteById,
+  getNotesByIds,
+  findRelatedNoteIds,
   insertNote,
   insertRawItem,
   linkNoteEntities,
   upsertEntities,
   type NoteWithEntities,
 } from "./repository";
+import { getRetriever } from "./retriever";
 import { notesBundleMarkdown, writeNoteMarkdown } from "./markdownStore";
 
 function serializeNote(n: NoteWithEntities) {
@@ -35,14 +32,16 @@ export async function ingestText(input: {
   source?: string | null;
   author?: string | null;
 }) {
+  const llm = getLLMClient();
+
   // Run LLM calls outside the transaction so the DB connection is not held
   // open across (potentially slow) network calls.
-  const classified = await classifyNotes(input.text, {
+  const classified = await llm.classifyNotes(input.text, {
     source: input.source,
     author: input.author,
   });
   const perNoteEntities = await Promise.all(
-    classified.map((n) => extractEntities(n.body)),
+    classified.map((n) => llm.extractEntities(n.body)),
   );
 
   const persisted = await db.transaction(async (tx) => {
@@ -96,10 +95,15 @@ export async function searchNotes(input: {
   limit?: number;
   types?: string[] | null;
 }) {
+  const llm = getLLMClient();
+  const retriever = getRetriever();
   const limit = input.limit ?? 10;
-  const interpreted = await interpretQuery(input.query);
+  const interpreted = await llm.interpretQuery(input.query);
   const effective = interpreted ?? input.query;
-  const hits = await ftsSearch(effective, { limit, types: input.types ?? null });
+  const hits = await retriever.search(effective, {
+    limit,
+    types: input.types ?? null,
+  });
   return {
     query: input.query,
     interpretedQuery: interpreted,
@@ -113,16 +117,46 @@ export async function buildContext(input: {
   types?: string[] | null;
   synthesize?: boolean;
 }) {
+  const llm = getLLMClient();
+  const retriever = getRetriever();
   const limit = input.limit ?? 8;
-  const interpreted = await interpretQuery(input.query);
+  const interpreted = await llm.interpretQuery(input.query);
   const effective = interpreted ?? input.query;
-  const hits = await ftsSearch(effective, { limit, types: input.types ?? null });
-  const fullNotes = hits.map((h) => h.note);
-  const bundleMarkdown = notesBundleMarkdown(fullNotes);
+  const directHits = await retriever.search(effective, {
+    limit,
+    types: input.types ?? null,
+  });
+
+  // Expand: pull related notes via explicit note_links and shared entities.
+  const seedIds = directHits.map((h) => h.note.id);
+  const relatedExtra = Math.max(2, Math.floor(limit / 2));
+  const relatedIds = await findRelatedNoteIds(seedIds, { limit: relatedExtra });
+  const relatedNotes = await getNotesByIds(
+    relatedIds.filter((id) => !seedIds.includes(id)),
+  );
+
+  const allNotes: NoteWithEntities[] = [
+    ...directHits.map((h) => h.note),
+    ...relatedNotes,
+  ];
+  const bundleMarkdown = notesBundleMarkdown(allNotes);
+
+  const hits = [
+    ...directHits.map((h) => ({
+      note: serializeNote(h.note),
+      score: h.score,
+      via: "direct" as const,
+    })),
+    ...relatedNotes.map((n) => ({
+      note: serializeNote(n),
+      score: 0,
+      via: "related" as const,
+    })),
+  ];
 
   let synthesisNote: ReturnType<typeof serializeNote> | null = null;
   if (input.synthesize) {
-    const syn = await synthesize(input.query, bundleMarkdown);
+    const syn = await llm.synthesize(input.query, bundleMarkdown);
     if (syn) {
       const inserted = await db.transaction(async (tx) =>
         insertNote(tx, {
@@ -133,7 +167,7 @@ export async function buildContext(input: {
           tags: ["synthesis"],
           metadata: {
             query: input.query,
-            sourceNoteIds: fullNotes.map((n) => n.id),
+            sourceNoteIds: allNotes.map((n) => n.id),
           },
         }),
       );
@@ -156,7 +190,7 @@ export async function buildContext(input: {
   return {
     query: input.query,
     interpretedQuery: interpreted,
-    hits: hits.map((h) => ({ note: serializeNote(h.note), score: h.score })),
+    hits,
     bundleMarkdown,
     synthesisNote,
   };
