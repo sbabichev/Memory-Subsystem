@@ -1,12 +1,78 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ingestText,
   searchNotes,
   buildContext,
   getNote,
+  setAuthTokenGetter,
 } from "@workspace/api-client-react";
 
 type Pane = "ingest" | "search" | "context" | "note";
+
+const API_KEY_STORAGE_KEY = "memory.inspector.apiKey";
+
+function readStoredKey(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(API_KEY_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+let currentKey = readStoredKey();
+setAuthTokenGetter(() => currentKey || null);
+
+function setApiKey(value: string) {
+  currentKey = value;
+  try {
+    if (value) {
+      window.localStorage.setItem(API_KEY_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function ApiKeyBar() {
+  const [value, setValue] = useState<string>(() => readStoredKey());
+  const [revealed, setRevealed] = useState(false);
+
+  useEffect(() => {
+    setApiKey(value);
+  }, [value]);
+
+  return (
+    <div className="flex gap-2 items-center mb-3">
+      <label className="text-xs font-mono text-neutral-600 shrink-0">
+        API key
+      </label>
+      <input
+        type={revealed ? "text" : "password"}
+        className="flex-1 border border-neutral-300 px-2 py-1 text-sm font-mono"
+        placeholder="MEMORY_API_KEY (sent as Bearer token)"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <button
+        type="button"
+        onClick={() => setRevealed((r) => !r)}
+        className="text-xs font-mono border border-neutral-300 px-2 py-1 hover:border-neutral-500"
+      >
+        {revealed ? "hide" : "show"}
+      </button>
+      <button
+        type="button"
+        onClick={() => setValue("")}
+        className="text-xs font-mono border border-neutral-300 px-2 py-1 hover:border-neutral-500"
+      >
+        clear
+      </button>
+    </div>
+  );
+}
 
 function Section({
   id,
@@ -260,6 +326,7 @@ function App() {
           test panel for the memory subsystem &mdash; raw JSON in, raw JSON out
         </p>
       </header>
+      <ApiKeyBar />
       <nav className="flex gap-2 mb-4 flex-wrap">
         <Section id="ingest" title="1. ingest" active={active} onClick={setActive} />
         <Section id="search" title="2. search" active={active} onClick={setActive} />
