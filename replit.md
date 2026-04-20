@@ -20,7 +20,8 @@ A modular memory subsystem for an AI-oriented architecture. Ingests text, classi
 - `lib/api-spec/openapi.yaml` — OpenAPI 3.1 contract; codegen produces Zod schemas (`@workspace/api-zod`) and React Query hooks (`@workspace/api-client-react`).
 - `artifacts/api-server/src/memory/` — `llm.ts`, `repository.ts`, `markdownStore.ts`, `services.ts`.
 - `artifacts/api-server/src/routes/memory.ts` — Express routes for the 4 endpoints.
-- `artifacts/inspector/` — minimal React test panel (no design polish, JSON in / JSON out).
+- `artifacts/api-server/src/middlewares/auth.ts` — `requireApiKey` middleware: requires `Authorization: Bearer <key>` or `X-API-Key: <key>` matching `MEMORY_API_KEY` for all memory routes (health stays open).
+- `artifacts/inspector/` — minimal React test panel (no design polish, JSON in / JSON out). Reads `VITE_MEMORY_API_KEY` and registers an auth-token getter so all calls send the bearer header automatically.
 
 ## Endpoints
 

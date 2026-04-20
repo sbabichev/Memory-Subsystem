@@ -45,4 +45,3 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-MEMORY_API_KEY = "pll6in5hrq0x-a9JCuEh9s83PrtUsTsQ"

@@ -26,8 +26,13 @@ if (!basePath) {
   );
 }
 
+const memoryApiKey = process.env.MEMORY_API_KEY ?? "";
+
 export default defineConfig({
   base: basePath,
+  define: {
+    "import.meta.env.VITE_MEMORY_API_KEY": JSON.stringify(memoryApiKey),
+  },
   plugins: [
     react(),
     tailwindcss(),
