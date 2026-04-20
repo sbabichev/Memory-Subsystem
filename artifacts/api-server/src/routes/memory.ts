@@ -13,11 +13,8 @@ import {
   searchNotes,
 } from "../memory/services";
 import { logger } from "../lib/logger";
-import { requireApiKey } from "../middlewares/auth";
 
 const router: IRouter = Router();
-
-router.use(requireApiKey);
 
 function handleError(res: Response, err: unknown) {
   if (err instanceof ZodError) {

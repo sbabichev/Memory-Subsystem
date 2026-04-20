@@ -13,18 +13,18 @@ function timingSafeEquals(a: string, b: string): boolean {
   return mismatch === 0;
 }
 
-export function requireApiKey(): RequestHandler {
-  const expected = process.env.MEMORY_API_KEY;
-  if (!expected) {
-    // Fail-closed: never start serving protected routes without a configured key.
-    logger.fatal(
-      "MEMORY_API_KEY is not set. Refusing to start the memory API without an API key configured.",
-    );
-    throw new Error(
-      "MEMORY_API_KEY environment variable is required to start the memory API.",
-    );
-  }
+const expectedKey = process.env["MEMORY_API_KEY"];
 
+if (!expectedKey || expectedKey.trim() === "") {
+  logger.fatal(
+    "MEMORY_API_KEY environment variable is required but was not set. Refusing to start.",
+  );
+  process.exit(1);
+}
+
+const EXPECTED = expectedKey.trim();
+
+export function requireApiKey(): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const header = req.header(HEADER) ?? "";
     if (!header.startsWith(PREFIX)) {
@@ -32,7 +32,7 @@ export function requireApiKey(): RequestHandler {
       return;
     }
     const token = header.slice(PREFIX.length).trim();
-    if (!token || !timingSafeEquals(token, expected!)) {
+    if (!token || !timingSafeEquals(token, EXPECTED)) {
       res.status(401).json({ error: "Invalid API key" });
       return;
     }
