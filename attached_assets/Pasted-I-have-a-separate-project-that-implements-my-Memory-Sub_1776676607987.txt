@@ -1,0 +1,134 @@
+I have a separate project that implements my Memory Subsystem.
+
+I now need to export a compact but complete integration contract for another project called "Archivist Core", so that Archivist can correctly interact with this Memory Subsystem without needing to read the whole codebase.
+
+Please inspect this project and generate a single markdown document named:
+
+ARCHIVIST_MEMORY_INTEGRATION.md
+
+The purpose of this document:
+
+* explain how an external smart broker layer ("Archivist Core") should interact with this Memory Subsystem
+* document only the parts needed for integration and orchestration
+* avoid dumping the whole implementation
+* focus on API behavior, auth, schemas, runtime semantics, and usage patterns
+
+Structure the document with these sections:
+
+1. Overview
+
+* what this Memory Subsystem does
+* what it does NOT do
+* its role in the larger architecture
+
+2. Authentication
+
+* how auth works
+* required headers
+* how MEMORY_API_KEY is used
+* which endpoints are protected
+* which endpoints are public
+
+3. Endpoints
+   For each endpoint, document:
+
+* method
+* path
+* purpose
+* request body schema
+* response schema
+* example request
+* example response
+* common failure cases
+
+Endpoints to document:
+
+* POST /api/ingest/text
+* GET /api/notes/:id
+* POST /api/search
+* POST /api/context/build
+* GET /api/healthz
+
+4. Runtime semantics
+   Explain:
+
+* what ingest actually does internally at a high level
+* which LLM steps are required
+* which LLM steps are optional
+* what search currently means
+* what context/build returns and how it should be used by an external caller
+* what "related notes" means in the current implementation
+
+5. Key domain objects
+   Document the important runtime objects and fields Archivist should care about:
+
+* RawItem
+* Note
+* Entity
+* NoteLink
+* Context bundle / search hit structures
+
+Do not document unnecessary DB internals unless needed for integration.
+
+6. Integration guidance for Archivist Core
+   Explain:
+
+* when Archivist should call ingest vs search vs context/build
+* when Archivist should prefer deterministic routing
+* when Archivist should use context/build instead of search
+* how Archivist should handle no-result cases
+* how Archivist should treat note ids
+* what assumptions are safe vs unsafe
+
+7. Known limitations of the current subsystem
+   Examples:
+
+* lexical search only
+* no semantic search yet
+* broad queries may return mixed-context notes
+* no multi-tenant isolation
+* no advanced ranking
+* etc.
+
+8. Example interaction patterns
+   Provide 5 realistic examples:
+
+* save a new idea
+* find a known concept
+* ask for context bundle
+* fetch a note by id
+* handle no results
+
+9. Minimal OpenAPI-like summary
+   At the end, provide a compact machine-friendly block summarizing:
+
+* auth
+* endpoints
+* request/response fields
+* error codes
+
+Important constraints:
+
+* base everything on the actual implementation in this workspace
+* do not invent behavior not present in code
+* if something is unclear, explicitly mark it as inferred or unknown
+* prefer precise and compact language
+* include concrete examples from the real code where possible
+* do not rewrite the codebase, produce an integration contract
+
+Also create a second much shorter file:
+
+ARCHIVIST_MEMORY_QUICKSTART.md
+
+This file should be only 1 page long and contain:
+
+* auth header format
+* the 4 main endpoints
+* one request example for each
+* one short note on when to use each endpoint
+* top 5 limitations
+
+After generating both files, summarize:
+
+* what Archivist Core absolutely needs to know
+* what it does NOT need to know from this project
