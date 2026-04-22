@@ -1,6 +1,7 @@
 import { getLLMClient } from "./llm";
 import {
   db,
+  ensureTenant,
   getNoteById,
   getNotesByIds,
   findRelatedNoteIds,
@@ -28,15 +29,17 @@ function serializeNote(n: NoteWithEntities) {
   };
 }
 
-export async function ingestText(input: {
-  text: string;
-  source?: string | null;
-  author?: string | null;
-}) {
+export async function ingestText(
+  input: {
+    text: string;
+    source?: string | null;
+    author?: string | null;
+  },
+  tenantSlug: string,
+) {
+  const tenantId = await ensureTenant(tenantSlug);
   const llm = getLLMClient();
 
-  // Run LLM calls outside the transaction so the DB connection is not held
-  // open across (potentially slow) network calls.
   const classified = await llm.classifyNotes(input.text, {
     source: input.source,
     author: input.author,
@@ -46,11 +49,17 @@ export async function ingestText(input: {
   );
 
   const persisted = await db.transaction(async (tx) => {
-    const raw = await insertRawItem(tx, input);
+    const raw = await insertRawItem(tx, {
+      tenantId,
+      text: input.text,
+      source: input.source,
+      author: input.author,
+    });
     const created: NoteWithEntities[] = [];
     for (let i = 0; i < classified.length; i++) {
       const n = classified[i];
       const inserted = await insertNote(tx, {
+        tenantId,
         type: n.type,
         title: n.title,
         body: n.body,
@@ -58,7 +67,7 @@ export async function ingestText(input: {
         tags: n.tags,
         sourceItemId: raw.id,
       });
-      const upserted = await upsertEntities(tx, perNoteEntities[i]);
+      const upserted = await upsertEntities(tx, tenantId, perNoteEntities[i]);
       await linkNoteEntities(tx, inserted.id, upserted.map((e) => e.id));
       created.push({
         id: inserted.id,
@@ -75,11 +84,10 @@ export async function ingestText(input: {
     return { rawId: raw.id, notes: created };
   });
 
-  // Markdown export is best-effort and outside the transaction.
   for (const n of persisted.notes) {
-    const mdPath = await writeNoteMarkdown(n);
+    const mdPath = await writeNoteMarkdown(n, tenantSlug, tenantId);
     if (mdPath) {
-      await setNoteMarkdownPath(n.id, mdPath);
+      await setNoteMarkdownPath(n.id, tenantId, mdPath);
     }
   }
 
@@ -89,16 +97,21 @@ export async function ingestText(input: {
   };
 }
 
-export async function fetchNote(id: string) {
-  const n = await getNoteById(id);
+export async function fetchNote(id: string, tenantSlug: string) {
+  const tenantId = await ensureTenant(tenantSlug);
+  const n = await getNoteById(id, tenantId);
   return n ? serializeNote(n) : null;
 }
 
-export async function searchNotes(input: {
-  query: string;
-  limit?: number;
-  types?: string[] | null;
-}) {
+export async function searchNotes(
+  input: {
+    query: string;
+    limit?: number;
+    types?: string[] | null;
+  },
+  tenantSlug: string,
+) {
+  const tenantId = await ensureTenant(tenantSlug);
   const llm = getLLMClient();
   const retriever = getRetriever();
   const limit = input.limit ?? 10;
@@ -107,6 +120,7 @@ export async function searchNotes(input: {
   const hits = await retriever.search(effective, {
     limit,
     types: input.types ?? null,
+    tenantId,
   });
   return {
     query: input.query,
@@ -115,12 +129,16 @@ export async function searchNotes(input: {
   };
 }
 
-export async function buildContext(input: {
-  query: string;
-  limit?: number;
-  types?: string[] | null;
-  synthesize?: boolean;
-}) {
+export async function buildContext(
+  input: {
+    query: string;
+    limit?: number;
+    types?: string[] | null;
+    synthesize?: boolean;
+  },
+  tenantSlug: string,
+) {
+  const tenantId = await ensureTenant(tenantSlug);
   const llm = getLLMClient();
   const retriever = getRetriever();
   const limit = input.limit ?? 8;
@@ -129,14 +147,15 @@ export async function buildContext(input: {
   const directHits = await retriever.search(effective, {
     limit,
     types: input.types ?? null,
+    tenantId,
   });
 
-  // Expand: pull related notes via explicit note_links and shared entities.
   const seedIds = directHits.map((h) => h.note.id);
   const relatedExtra = Math.max(2, Math.floor(limit / 2));
-  const relatedIds = await findRelatedNoteIds(seedIds, { limit: relatedExtra });
+  const relatedIds = await findRelatedNoteIds(seedIds, { limit: relatedExtra }, tenantId);
   const relatedNotes = await getNotesByIds(
     relatedIds.filter((id) => !seedIds.includes(id)),
+    tenantId,
   );
 
   const allNotes: NoteWithEntities[] = [
@@ -164,6 +183,7 @@ export async function buildContext(input: {
     if (syn) {
       const inserted = await db.transaction(async (tx) =>
         insertNote(tx, {
+          tenantId,
           type: "synthesis",
           title: syn.title,
           body: syn.body,
@@ -186,8 +206,8 @@ export async function buildContext(input: {
         createdAt: inserted.createdAt,
         entities: [],
       };
-      const synPath = await writeNoteMarkdown(full);
-      if (synPath) await setNoteMarkdownPath(full.id, synPath);
+      const synPath = await writeNoteMarkdown(full, tenantSlug, tenantId);
+      if (synPath) await setNoteMarkdownPath(full.id, tenantId, synPath);
       synthesisNote = serializeNote(full);
     }
   }

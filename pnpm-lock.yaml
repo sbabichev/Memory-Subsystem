@@ -224,6 +224,9 @@ importers:
       thread-stream:
         specifier: 3.1.0
         version: 3.1.0
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
 
   artifacts/inspector:
     devDependencies:
@@ -492,6 +495,9 @@ importers:
       drizzle-kit:
         specifier: ^0.31.9
         version: 0.31.9
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
 
   lib/integrations-gemini-ai:
     dependencies:

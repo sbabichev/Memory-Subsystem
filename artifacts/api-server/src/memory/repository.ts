@@ -5,8 +5,9 @@ import {
   entities,
   noteEntities,
   noteLinks,
+  tenants,
 } from "@workspace/db";
-import { and, eq, inArray, ne, or, sql, desc } from "drizzle-orm";
+import { and, eq, inArray, or, sql, desc } from "drizzle-orm";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Executor = typeof db | Tx;
@@ -16,9 +17,63 @@ function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// ---------------------------------------------------------------------------
+// Tenant resolution (slug → UUID) with an in-process cache.
+// Slugs are stable, so caching indefinitely is safe.
+// ---------------------------------------------------------------------------
+
+const tenantIdCache = new Map<string, string>();
+
+export async function getTenantIdBySlug(slug: string): Promise<string> {
+  const cached = tenantIdCache.get(slug);
+  if (cached) return cached;
+
+  const rows = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.slug, slug))
+    .limit(1);
+
+  if (rows.length === 0) {
+    throw new Error(`Tenant with slug "${slug}" not found`);
+  }
+
+  tenantIdCache.set(slug, rows[0].id);
+  return rows[0].id;
+}
+
+/** Ensure a tenant exists (create if absent) and return its id. */
+export async function ensureTenant(slug: string): Promise<string> {
+  const existing = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.slug, slug))
+    .limit(1);
+  if (existing.length > 0) {
+    tenantIdCache.set(slug, existing[0].id);
+    return existing[0].id;
+  }
+  const [row] = await db
+    .insert(tenants)
+    .values({ slug })
+    .onConflictDoNothing({ target: tenants.slug })
+    .returning({ id: tenants.id });
+  if (row) {
+    tenantIdCache.set(slug, row.id);
+    return row.id;
+  }
+  // Race: another process inserted it; refetch.
+  return getTenantIdBySlug(slug);
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
 export async function insertRawItem(
   tx: Executor,
   input: {
+    tenantId: string;
     text: string;
     source?: string | null;
     author?: string | null;
@@ -27,6 +82,7 @@ export async function insertRawItem(
   const [row] = await tx
     .insert(rawItems)
     .values({
+      tenantId: input.tenantId,
       text: input.text,
       source: input.source ?? null,
       author: input.author ?? null,
@@ -38,6 +94,7 @@ export async function insertRawItem(
 export async function insertNote(
   tx: Executor,
   input: {
+    tenantId: string;
     type: string;
     title: string;
     body: string;
@@ -51,6 +108,7 @@ export async function insertNote(
   const [row] = await tx
     .insert(notes)
     .values({
+      tenantId: input.tenantId,
       type: input.type,
       title: input.title,
       body: input.body,
@@ -66,23 +124,27 @@ export async function insertNote(
 
 export async function setNoteMarkdownPath(
   noteId: string,
+  tenantId: string,
   markdownPath: string,
 ): Promise<void> {
-  await db.update(notes).set({ markdownPath }).where(eq(notes.id, noteId));
+  await db
+    .update(notes)
+    .set({ markdownPath })
+    .where(and(eq(notes.id, noteId), eq(notes.tenantId, tenantId)));
 }
 
 export async function upsertEntities(
   tx: Executor,
+  tenantId: string,
   ents: { type: string; name: string }[],
 ): Promise<{ id: string; type: string; name: string }[]> {
   if (ents.length === 0) return [];
-  // Deduplicate within the call so a single ON CONFLICT row is produced per pair.
-  const seen = new Map<string, { type: string; name: string; normalizedName: string }>();
+  const seen = new Map<string, { tenantId: string; type: string; name: string; normalizedName: string }>();
   for (const e of ents) {
     const normalized = normalizeName(e.name);
     const key = `${e.type}|${normalized}`;
     if (!seen.has(key)) {
-      seen.set(key, { type: e.type, name: e.name, normalizedName: normalized });
+      seen.set(key, { tenantId, type: e.type, name: e.name, normalizedName: normalized });
     }
   }
   const values = Array.from(seen.values());
@@ -90,16 +152,19 @@ export async function upsertEntities(
     .insert(entities)
     .values(values)
     .onConflictDoNothing({
-      target: [entities.type, entities.normalizedName],
+      target: [entities.tenantId, entities.type, entities.normalizedName],
     });
   const rows = await tx
     .select()
     .from(entities)
     .where(
-      sql`(${entities.type}, ${entities.normalizedName}) IN (${sql.join(
-        values.map((v) => sql`(${v.type}, ${v.normalizedName})`),
-        sql`, `,
-      )})`,
+      and(
+        eq(entities.tenantId, tenantId),
+        sql`(${entities.type}, ${entities.normalizedName}) IN (${sql.join(
+          values.map((v) => sql`(${v.type}, ${v.normalizedName})`),
+          sql`, `,
+        )})`,
+      ),
     );
   return rows.map((r) => ({ id: r.id, type: r.type, name: r.name }));
 }
@@ -116,6 +181,10 @@ export async function linkNoteEntities(
     .onConflictDoNothing();
 }
 
+// ---------------------------------------------------------------------------
+// Reads (all scoped to tenantId)
+// ---------------------------------------------------------------------------
+
 export type NoteWithEntities = {
   id: string;
   type: string;
@@ -128,7 +197,7 @@ export type NoteWithEntities = {
   entities: { id: string; type: string; name: string }[];
 };
 
-async function attachEntities(noteRows: (typeof notes.$inferSelect)[]): Promise<NoteWithEntities[]> {
+async function attachEntities(noteRows: (typeof notes.$inferSelect)[], tenantId: string): Promise<NoteWithEntities[]> {
   if (noteRows.length === 0) return [];
   const ids = noteRows.map((n) => n.id);
   const links = await db
@@ -140,7 +209,7 @@ async function attachEntities(noteRows: (typeof notes.$inferSelect)[]): Promise<
     })
     .from(noteEntities)
     .innerJoin(entities, eq(noteEntities.entityId, entities.id))
-    .where(inArray(noteEntities.noteId, ids));
+    .where(and(inArray(noteEntities.noteId, ids), eq(entities.tenantId, tenantId)));
   const byNote = new Map<string, { id: string; type: string; name: string }[]>();
   for (const l of links) {
     const arr = byNote.get(l.noteId) ?? [];
@@ -160,27 +229,40 @@ async function attachEntities(noteRows: (typeof notes.$inferSelect)[]): Promise<
   }));
 }
 
-export async function getNoteById(id: string): Promise<NoteWithEntities | null> {
-  const rows = await db.select().from(notes).where(eq(notes.id, id)).limit(1);
+export async function getNoteById(id: string, tenantId: string): Promise<NoteWithEntities | null> {
+  const rows = await db
+    .select()
+    .from(notes)
+    .where(and(eq(notes.id, id), eq(notes.tenantId, tenantId)))
+    .limit(1);
   if (rows.length === 0) return null;
-  const [withEnts] = await attachEntities(rows);
+  const [withEnts] = await attachEntities(rows, tenantId);
   return withEnts;
 }
 
-export async function getNotesByIds(ids: string[]): Promise<NoteWithEntities[]> {
+export async function getNotesByIds(ids: string[], tenantId: string): Promise<NoteWithEntities[]> {
   if (ids.length === 0) return [];
-  const rows = await db.select().from(notes).where(inArray(notes.id, ids));
-  return attachEntities(rows);
+  const rows = await db
+    .select()
+    .from(notes)
+    .where(and(inArray(notes.id, ids), eq(notes.tenantId, tenantId)));
+  return attachEntities(rows, tenantId);
 }
 
 export async function findRelatedNoteIds(
   seedNoteIds: string[],
   opts: { limit: number },
+  tenantId: string,
 ): Promise<string[]> {
   if (seedNoteIds.length === 0) return [];
 
+  const linked = new Set<string>();
+
   // 1. Notes connected via explicit note_links (either direction).
-  const linkRows = await db
+  //    Fetch raw link rows first (no tenant filter on the join — the seed IDs
+  //    are already tenant-scoped, but the opposite end may not be).  Then
+  //    explicitly verify candidate IDs belong to tenantId before accepting them.
+  const rawLinkRows = await db
     .select({
       from: noteLinks.fromNoteId,
       to: noteLinks.toNoteId,
@@ -192,17 +274,39 @@ export async function findRelatedNoteIds(
         inArray(noteLinks.toNoteId, seedNoteIds),
       ),
     );
-  const linked = new Set<string>();
-  for (const r of linkRows) {
-    if (!seedNoteIds.includes(r.from)) linked.add(r.from);
-    if (!seedNoteIds.includes(r.to)) linked.add(r.to);
+
+  // Collect candidates that are not in the seed set.
+  const linkCandidates = new Set<string>();
+  for (const r of rawLinkRows) {
+    if (!seedNoteIds.includes(r.from)) linkCandidates.add(r.from);
+    if (!seedNoteIds.includes(r.to)) linkCandidates.add(r.to);
   }
 
-  // 2. Notes that share at least one entity with the seed set.
+  // Verify tenant membership — this is the hard isolation guarantee.
+  if (linkCandidates.size > 0) {
+    const verified = await db
+      .select({ id: notes.id })
+      .from(notes)
+      .where(
+        and(
+          inArray(notes.id, Array.from(linkCandidates)),
+          eq(notes.tenantId, tenantId),
+        ),
+      );
+    for (const r of verified) linked.add(r.id);
+  }
+
+  // 2. Notes that share at least one entity with the seed set (tenant-scoped).
   const seedEntityRows = await db
     .select({ entityId: noteEntities.entityId })
     .from(noteEntities)
-    .where(inArray(noteEntities.noteId, seedNoteIds));
+    .innerJoin(entities, eq(noteEntities.entityId, entities.id))
+    .where(
+      and(
+        inArray(noteEntities.noteId, seedNoteIds),
+        eq(entities.tenantId, tenantId),
+      ),
+    );
   const entityIds = Array.from(new Set(seedEntityRows.map((r) => r.entityId)));
 
   if (entityIds.length > 0) {
@@ -212,9 +316,11 @@ export async function findRelatedNoteIds(
         cnt: sql<number>`count(*)`.as("cnt"),
       })
       .from(noteEntities)
+      .innerJoin(notes, eq(noteEntities.noteId, notes.id))
       .where(
         and(
           inArray(noteEntities.entityId, entityIds),
+          eq(notes.tenantId, tenantId),
           sql`${noteEntities.noteId} <> ALL(${sql.raw(
             `ARRAY[${seedNoteIds.map((id) => `'${id}'::uuid`).join(",")}]`,
           )})`,
@@ -235,10 +341,8 @@ export type SearchHitRow = { note: NoteWithEntities; score: number };
 
 export async function ftsSearch(
   query: string,
-  opts: { limit: number; types?: string[] | null },
+  opts: { limit: number; types?: string[] | null; tenantId: string },
 ): Promise<SearchHitRow[]> {
-  // Transform "foo bar baz" into `foo OR bar OR baz` for broader recall while
-  // still allowing the user to pass quoted phrases (preserved by websearch_to_tsquery).
   const orQuery = query.includes('"')
     ? query
     : query
@@ -246,7 +350,10 @@ export async function ftsSearch(
         .filter((t) => t.trim().length > 0)
         .join(" OR ");
   const tsq = sql`websearch_to_tsquery('english', ${orQuery})`;
-  const whereParts = [sql`${notes.searchVector} @@ ${tsq}`];
+  const whereParts = [
+    sql`${notes.searchVector} @@ ${tsq}`,
+    eq(notes.tenantId, opts.tenantId),
+  ];
   if (opts.types && opts.types.length > 0) {
     whereParts.push(inArray(notes.type, opts.types));
   }
@@ -260,8 +367,10 @@ export async function ftsSearch(
     .orderBy(desc(sql`score`))
     .limit(opts.limit);
   if (rows.length === 0) {
-    // fallback: ILIKE on title/body for substring matches not covered by FTS
-    const ilikeWhere = [sql`(${notes.title} ILIKE ${"%" + query + "%"} OR ${notes.body} ILIKE ${"%" + query + "%"})`];
+    const ilikeWhere = [
+      sql`(${notes.title} ILIKE ${"%" + query + "%"} OR ${notes.body} ILIKE ${"%" + query + "%"})`,
+      eq(notes.tenantId, opts.tenantId),
+    ];
     if (opts.types && opts.types.length > 0) {
       ilikeWhere.push(inArray(notes.type, opts.types));
     }
@@ -271,9 +380,9 @@ export async function ftsSearch(
       .where(and(...ilikeWhere))
       .orderBy(desc(notes.createdAt))
       .limit(opts.limit);
-    const hydrated = await attachEntities(fallback);
+    const hydrated = await attachEntities(fallback, opts.tenantId);
     return hydrated.map((n) => ({ note: n, score: 0.01 }));
   }
-  const hydrated = await attachEntities(rows.map((r) => r.note));
+  const hydrated = await attachEntities(rows.map((r) => r.note), opts.tenantId);
   return hydrated.map((n, i) => ({ note: n, score: Number(rows[i].score) }));
 }

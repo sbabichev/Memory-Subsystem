@@ -3,7 +3,19 @@ import path from "node:path";
 import type { NoteWithEntities } from "./repository";
 import { logger } from "../lib/logger";
 
-const MD_DIR = process.env.MEMORY_MD_DIR ?? path.resolve(process.cwd(), ".data/notes");
+const MD_BASE_DIR = process.env.MEMORY_MD_DIR ?? path.resolve(process.cwd(), ".data/notes");
+
+/**
+ * Produce a collision-proof directory name for a tenant by appending a short
+ * prefix of the UUID to the sanitized slug.  This prevents distinct slugs
+ * that differ only in special characters (e.g. "foo.bar" vs "foo!bar") from
+ * sharing the same export directory.
+ */
+function tenantDir(tenantSlug: string, tenantId: string): string {
+  const safePart = tenantSlug.replace(/[^a-z0-9-_]/gi, "_").replace(/__+/g, "_").replace(/^_|_$/g, "") || "tenant";
+  const idPrefix = tenantId.replace(/-/g, "").slice(0, 8);
+  return path.join(MD_BASE_DIR, `${safePart}-${idPrefix}`);
+}
 
 function safeFilename(note: NoteWithEntities): string {
   const slug = note.title
@@ -37,12 +49,16 @@ export function noteToMarkdown(note: NoteWithEntities): string {
 
 export async function writeNoteMarkdown(
   note: NoteWithEntities,
+  tenantSlug: string,
+  tenantId: string,
 ): Promise<string | null> {
   try {
-    await fs.mkdir(MD_DIR, { recursive: true });
+    const dir = tenantDir(tenantSlug, tenantId);
+    await fs.mkdir(dir, { recursive: true });
     const filename = safeFilename(note);
-    await fs.writeFile(path.join(MD_DIR, filename), noteToMarkdown(note), "utf8");
-    return path.join(path.relative(process.cwd(), MD_DIR), filename);
+    const fullPath = path.join(dir, filename);
+    await fs.writeFile(fullPath, noteToMarkdown(note), "utf8");
+    return path.join(path.relative(process.cwd(), dir), filename);
   } catch (err) {
     logger.warn({ err, noteId: note.id }, "Failed to write markdown export");
     return null;

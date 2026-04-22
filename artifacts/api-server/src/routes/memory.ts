@@ -21,15 +21,18 @@ function handleError(res: Response, err: unknown) {
     res.status(400).json({ error: "Invalid request" });
     return;
   }
-  // Log internals server-side; never leak them to the client.
   logger.error({ err }, "Memory route failed");
   res.status(500).json({ error: "Internal server error" });
+}
+
+function getTenantSlug(res: Response): string {
+  return res.locals["tenantSlug"] as string;
 }
 
 router.post("/ingest/text", async (req, res) => {
   try {
     const body = IngestTextBody.parse(req.body);
-    const out = await ingestText(body);
+    const out = await ingestText(body, getTenantSlug(res));
     res.json(out);
   } catch (err) {
     handleError(res, err);
@@ -39,7 +42,7 @@ router.post("/ingest/text", async (req, res) => {
 router.get("/notes/:id", async (req, res) => {
   try {
     const params = GetNoteParams.parse(req.params);
-    const note = await fetchNote(params.id);
+    const note = await fetchNote(params.id, getTenantSlug(res));
     if (!note) {
       res.status(404).json({ error: "Note not found" });
       return;
@@ -53,7 +56,7 @@ router.get("/notes/:id", async (req, res) => {
 router.post("/search", async (req, res) => {
   try {
     const body = SearchNotesBody.parse(req.body);
-    const out = await searchNotes(body);
+    const out = await searchNotes(body, getTenantSlug(res));
     res.json(out);
   } catch (err) {
     handleError(res, err);
@@ -63,7 +66,7 @@ router.post("/search", async (req, res) => {
 router.post("/context/build", async (req, res) => {
   try {
     const body = BuildContextBody.parse(req.body);
-    const out = await buildContext(body);
+    const out = await buildContext(body, getTenantSlug(res));
     res.json(out);
   } catch (err) {
     handleError(res, err);

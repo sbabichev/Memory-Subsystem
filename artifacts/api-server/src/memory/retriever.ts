@@ -3,6 +3,7 @@ import { ftsSearch, type SearchHitRow } from "./repository";
 export type RetrieverSearchOptions = {
   limit: number;
   types?: string[] | null;
+  tenantId: string;
 };
 
 export interface Retriever {

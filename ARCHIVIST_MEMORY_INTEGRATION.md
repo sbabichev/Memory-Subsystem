@@ -14,7 +14,6 @@ The Memory Subsystem is an HTTP service that:
 It does **not**:
 
 - Provide semantic / vector search. Retrieval today is Postgres full-text search (`websearch_to_tsquery` over an `english` config) with an `ILIKE` fallback. See `src/memory/repository.ts` (`ftsSearch`) and `src/memory/retriever.ts` (`KeywordRetriever`).
-- Provide multi-tenant isolation. There is no per-user / per-tenant scoping anywhere — a single `MEMORY_API_KEY` grants access to the whole store.
 - Expose update or delete endpoints. The only writes happen as a side effect of `POST /api/ingest/text` and `POST /api/context/build` (when `synthesize=true` produces a `synthesis` note).
 - Stream. All responses are single JSON payloads.
 
@@ -22,7 +21,7 @@ It does **not**:
 
 ---
 
-## 2. Authentication
+## 2. Authentication and Tenant Isolation
 
 - All `/api/*` routes **except** `GET /api/healthz` require an API key. See `src/routes/index.ts`:
   ```ts
@@ -31,13 +30,46 @@ It does **not**:
   ```
 - Header format (see `src/middlewares/apiKey.ts`):
   ```
-  Authorization: Bearer <MEMORY_API_KEY>
+  Authorization: Bearer <API_KEY>
   ```
-- The expected key is read from the `MEMORY_API_KEY` environment variable at server boot. If `MEMORY_API_KEY` is unset, the server **refuses to start** (fail-closed).
+- The middleware resolves the bearer token to a **tenant slug**. Every read and write is then automatically scoped to that tenant — cross-tenant access is impossible by construction (enforced at the repository layer via `tenant_id` FK on all tables).
 - Comparison is constant-time (length check + XOR loop) to avoid trivial timing leaks.
-- Failure modes (HTTP 401):
-  - Missing `Authorization` header, or it does not start with `Bearer ` → `{"error":"Missing or invalid Authorization header"}`
-  - Token present but does not match → `{"error":"Invalid API key"}`
+
+### Key → Tenant configuration
+
+Two mutually compatible environment variables control the mapping:
+
+| Variable | Format | Behavior |
+| -------- | ------ | -------- |
+| `MEMORY_API_KEYS` | JSON object `{"<key>":"<tenant-slug>",...}` | Multi-tenant: each key maps to a distinct tenant. |
+| `MEMORY_API_KEY`  | plain string | Single-tenant backward-compat: the key maps to the `"default"` tenant. |
+
+Both may be set simultaneously. If a key appears in `MEMORY_API_KEYS`, that mapping takes precedence; `MEMORY_API_KEY` is then used as a fallback for the `"default"` tenant only if it is not already listed. If **neither** variable is set the server **refuses to start** (fail-closed).
+
+**Single-key setup (existing deployments — no change required):**
+```sh
+MEMORY_API_KEY=my-secret-key
+```
+All data is stored under the `"default"` tenant.
+
+**Multi-key setup:**
+```sh
+MEMORY_API_KEYS='{"key-for-alice":"alice","key-for-bob":"bob"}'
+```
+Alice and Bob each see only their own notes; there is no shared store.
+
+### Tenant provisioning
+
+Tenant records are created on demand: the first request from an unknown slug automatically inserts a row in the `tenants` table. No admin step is required when adding a new key to `MEMORY_API_KEYS`.
+
+### Productization note
+
+This isolation primitive is designed for single-database multi-tenant deployments (e.g. multiple Archivist instances pointing at a shared Memory Subsystem). For paid product use, a **separate database per customer** is still the recommended approach — the `tenant_id` isolation makes a future migration straightforward but does not replace DB-level separation.
+
+### Failure modes (HTTP 401)
+
+- Missing `Authorization` header, or it does not start with `Bearer ` → `{"error":"Missing or invalid Authorization header"}`
+- Token present but does not match any configured key → `{"error":"Invalid API key"}`
 
 | Endpoint                  | Auth required |
 | ------------------------- | ------------- |
@@ -424,7 +456,6 @@ Archivist Core should classify intent *before* calling memory, not after. Sugges
 - Do not assume `score` values are comparable across queries or calibrated to a 0–1 range.
 - Do not assume `interpretedQuery` will be present — it is only set when the server-side flag is enabled.
 - Do not assume `synthesize: true` will produce a synthesis — the server-side flag may be off, in which case `synthesisNote` is `null` regardless.
-- Do not assume per-user / per-tenant scoping. Anything one caller ingests is visible to every caller with the API key.
 - Do not assume idempotency on ingest. The same text posted twice produces two `raw_items` and two sets of notes.
 - Do not assume `types` filtering applies to related notes in `/context/build` — it only filters direct hits.
 - Do not assume markdown export succeeded; do not depend on `markdownPath` being non-null (it is not exposed on the wire anyway).
@@ -434,15 +465,14 @@ Archivist Core should classify intent *before* calling memory, not after. Sugges
 ## 7. Known Limitations
 
 1. **Lexical search only.** Postgres FTS + ILIKE fallback. No embeddings, no vector store, no semantic similarity. A query that does not lexically match note tokens (or the LLM-rewritten query when that flag is on) will miss.
-2. **No multi-tenant isolation.** A single `MEMORY_API_KEY` grants access to the entire store. Multiple Archivist instances pointing at the same Memory Subsystem will share memory.
-3. **No update / delete endpoints.** Notes are append-only over HTTP. Corrections require ingesting a corrective note.
-4. **No advanced ranking / diversification.** `ts_rank` ordering only; ILIKE fallback hits all share `score: 0.01`. Related-note expansion is one-hop and ranked by share count.
-5. **LLM behavior is gated by env flags.** `interpretQuery` and `synthesize` are off unless `MEMORY_LLM_INTERPRET_QUERY=true` / `MEMORY_LLM_SYNTHESIZE=true`. If Gemini is not configured at all, classification falls back to a near-passthrough stub and entity extraction returns `[]`.
-6. **`types` filter is direct-only in `/context/build`.** Related notes ignore the filter.
-7. **No streaming, no pagination, no cursors.** Hard cap on `limit` (50). To page, you must re-query with different terms.
-8. **No rate limiting today** (inferred from middleware list — only `requireApiKey` is mounted before `memoryRouter`). A runaway caller can saturate the LLM and DB.
-9. **Markdown export is best-effort and local to the server's filesystem.** Not durable storage; not exposed via HTTP.
-10. **No webhook / push notifications.** Archivist must poll if it cares about background changes (which today it should not, since there are none).
+2. **No update / delete endpoints.** Notes are append-only over HTTP. Corrections require ingesting a corrective note.
+3. **No advanced ranking / diversification.** `ts_rank` ordering only; ILIKE fallback hits all share `score: 0.01`. Related-note expansion is one-hop and ranked by share count.
+4. **LLM behavior is gated by env flags.** `interpretQuery` and `synthesize` are off unless `MEMORY_LLM_INTERPRET_QUERY=true` / `MEMORY_LLM_SYNTHESIZE=true`. If Gemini is not configured at all, classification falls back to a near-passthrough stub and entity extraction returns `[]`.
+5. **`types` filter is direct-only in `/context/build`.** Related notes ignore the filter.
+6. **No streaming, no pagination, no cursors.** Hard cap on `limit` (50). To page, you must re-query with different terms.
+7. **No rate limiting today** (inferred from middleware list — only `requireApiKey` is mounted before `memoryRouter`). A runaway caller can saturate the LLM and DB.
+8. **Markdown export is best-effort and local to the server's filesystem.** Not durable storage; not exposed via HTTP.
+9. **No webhook / push notifications.** Archivist must poll if it cares about background changes (which today it should not, since there are none).
 
 ---
 

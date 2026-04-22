@@ -17,20 +17,38 @@ const tsvector = customType<{ data: string; driverData: string }>({
   },
 });
 
-export const rawItems = pgTable("raw_items", {
+export const tenants = pgTable("tenants", {
   id: uuid("id").primaryKey().defaultRandom(),
-  text: text("text").notNull(),
-  source: text("source"),
-  author: text("author"),
+  slug: text("slug").notNull().unique(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
 });
 
+export const rawItems = pgTable(
+  "raw_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    text: text("text").notNull(),
+    source: text("source"),
+    author: text("author"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("raw_items_tenant_idx").on(t.tenantId)],
+);
+
 export const notes = pgTable(
   "notes",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     type: text("type").notNull(),
     title: text("title").notNull(),
     body: text("body").notNull(),
@@ -52,6 +70,7 @@ export const notes = pgTable(
     index("notes_search_vector_idx").using("gin", t.searchVector),
     index("notes_type_idx").on(t.type),
     index("notes_source_item_idx").on(t.sourceItemId),
+    index("notes_tenant_idx").on(t.tenantId),
   ],
 );
 
@@ -59,6 +78,9 @@ export const entities = pgTable(
   "entities",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     type: text("type").notNull(),
     name: text("name").notNull(),
     normalizedName: text("normalized_name").notNull(),
@@ -66,7 +88,10 @@ export const entities = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [uniqueIndex("entities_type_name_idx").on(t.type, t.normalizedName)],
+  (t) => [
+    uniqueIndex("entities_type_name_idx").on(t.tenantId, t.type, t.normalizedName),
+    index("entities_tenant_idx").on(t.tenantId),
+  ],
 );
 
 export const noteEntities = pgTable(
@@ -99,12 +124,14 @@ export const noteLinks = pgTable(
   (t) => [primaryKey({ columns: [t.fromNoteId, t.toNoteId, t.relation] })],
 );
 
+export type Tenant = typeof tenants.$inferSelect;
 export type RawItem = typeof rawItems.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type Entity = typeof entities.$inferSelect;
 
 import { createInsertSchema } from "drizzle-zod";
 
+export const insertTenantSchema = createInsertSchema(tenants);
 export const insertRawItemSchema = createInsertSchema(rawItems);
 export const insertNoteSchema = createInsertSchema(notes);
 export const insertEntitySchema = createInsertSchema(entities);
