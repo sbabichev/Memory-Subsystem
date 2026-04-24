@@ -8,7 +8,9 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:isolation": "tsx src/memory/__tests__/tenant-isolation.ts"
+    "test:isolation": "tsx src/memory/__tests__/tenant-isolation.ts",
+    "test:unit": "tsx src/memory/__tests__/unit.ts",
+    "backfill:embeddings": "tsx src/scripts/backfill-embeddings.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",

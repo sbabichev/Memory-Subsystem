@@ -6,10 +6,13 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { SearchHit } from "./searchHit";
+import type { SearchMode } from "./searchMode";
 
 export interface SearchResponse {
   query: string;
   /** LLM-rewritten query, when the interpret-query flag is enabled */
   interpretedQuery?: string | null;
+  /** The retrieval mode actually used */
+  searchMode: SearchMode;
   hits: SearchHit[];
 }

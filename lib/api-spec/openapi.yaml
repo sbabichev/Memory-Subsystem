@@ -126,6 +126,10 @@ components:
     NoteType:
       type: string
       enum: [raw_source, note, insight, decision, synthesis, entity]
+    SearchMode:
+      type: string
+      enum: [lexical, semantic, hybrid]
+      description: "lexical: FTS only; semantic: vector similarity only; hybrid: RRF fusion of FTS + semantic (default)"
     Entity:
       type: object
       properties:
@@ -206,6 +210,10 @@ components:
           items:
             $ref: "#/components/schemas/NoteType"
           nullable: true
+        mode:
+          $ref: "#/components/schemas/SearchMode"
+          default: hybrid
+          description: "Retrieval mode. Defaults to hybrid (RRF fusion of FTS + semantic). Existing clients omitting this field continue to work unchanged."
       required: [query]
     SearchHit:
       type: object
@@ -224,11 +232,14 @@ components:
           type: string
           nullable: true
           description: LLM-rewritten query, when the interpret-query flag is enabled
+        searchMode:
+          $ref: "#/components/schemas/SearchMode"
+          description: The retrieval mode actually used
         hits:
           type: array
           items:
             $ref: "#/components/schemas/SearchHit"
-      required: [query, hits]
+      required: [query, hits, searchMode]
     BuildContextRequest:
       type: object
       properties:

@@ -102,6 +102,8 @@ export const GetNoteResponse = zod.object({
 export const searchNotesBodyLimitDefault = 10;
 export const searchNotesBodyLimitMax = 50;
 
+export const searchNotesBodyModeDefault = `hybrid`;
+
 export const SearchNotesBody = zod.object({
   query: zod.string().min(1),
   limit: zod
@@ -121,6 +123,12 @@ export const SearchNotesBody = zod.object({
       ]),
     )
     .nullish(),
+  mode: zod
+    .enum(["lexical", "semantic", "hybrid"])
+    .default(searchNotesBodyModeDefault)
+    .describe(
+      "Retrieval mode. Defaults to hybrid (RRF fusion of FTS + semantic). Existing clients omitting this field continue to work unchanged.",
+    ),
 });
 
 export const SearchNotesResponse = zod.object({
@@ -129,6 +137,9 @@ export const SearchNotesResponse = zod.object({
     .string()
     .nullish()
     .describe("LLM-rewritten query, when the interpret-query flag is enabled"),
+  searchMode: zod
+    .enum(["lexical", "semantic", "hybrid"])
+    .describe("The retrieval mode actually used"),
   hits: zod.array(
     zod.object({
       note: zod.object({

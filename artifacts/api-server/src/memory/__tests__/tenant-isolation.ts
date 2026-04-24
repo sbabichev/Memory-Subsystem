@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { db, tenants, notes, rawItems, entities, noteEntities, noteLinks } from "@workspace/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   ensureTenant,
   insertRawItem,
@@ -21,6 +21,7 @@ import {
   upsertEntities,
   getNoteById,
   ftsSearch,
+  semanticSearch,
   getNotesByIds,
   findRelatedNoteIds,
 } from "../repository.js";
@@ -151,6 +152,28 @@ async function testCrossTenantNoteEntitiesRegression() {
   }
 }
 
+async function testSemanticSearchIsolation() {
+  // Inject a real embedding vector into tenant A's note.
+  // Then verify semantic search scoped to tenant B does NOT return it.
+  const fakeEmbedding = new Array(1024).fill(0.5);
+  const vectorLiteral = `[${fakeEmbedding.join(",")}]`;
+  await db.execute(
+    sql`UPDATE notes SET embedding = ${sql.raw(`'${vectorLiteral}'::vector`)} WHERE id = ${sql.raw(`'${noteAId}'::uuid`)}`,
+  );
+
+  // Query with the same embedding (cosine distance = 0, closest possible match)
+  const hitsB = await semanticSearch(fakeEmbedding, { limit: 10, tenantId: tenantBId });
+  const leaked = hitsB.some((h) => h.note.id === noteAId);
+  assert.equal(leaked, false, "semanticSearch must NOT return Tenant A's note when scoped to Tenant B");
+
+  // Tenant A can find its own note via semantic search
+  const hitsA = await semanticSearch(fakeEmbedding, { limit: 10, tenantId: tenantAId });
+  const foundOwn = hitsA.some((h) => h.note.id === noteAId);
+  assert.ok(foundOwn, "Tenant A should find its own note via semantic search");
+
+  console.log("  ✓ semanticSearch isolation");
+}
+
 async function testCrossTenantNoteLinksRegression() {
   // Regression: explicitly insert a cross-tenant note_links edge (B → A).
   // This simulates a corrupted or maliciously crafted DB state.
@@ -197,6 +220,7 @@ async function main() {
     await testFtsSearch();
     await testRelatedExpansion();
     await testCrossTenantNoteEntitiesRegression();
+    await testSemanticSearchIsolation();
     await testCrossTenantNoteLinksRegression();
     console.log("\nAll tenant isolation tests passed.");
   } finally {

@@ -13,7 +13,6 @@ The Memory Subsystem is an HTTP service that:
 
 It does **not**:
 
-- Provide semantic / vector search. Retrieval today is Postgres full-text search (`websearch_to_tsquery` over an `english` config) with an `ILIKE` fallback. See `src/memory/repository.ts` (`ftsSearch`) and `src/memory/retriever.ts` (`KeywordRetriever`).
 - Expose update or delete endpoints. The only writes happen as a side effect of `POST /api/ingest/text` and `POST /api/context/build` (when `synthesize=true` produces a `synthesis` note).
 - Stream. All responses are single JSON payloads.
 
@@ -464,7 +463,7 @@ Archivist Core should classify intent *before* calling memory, not after. Sugges
 
 ## 7. Known Limitations
 
-1. **Lexical search only.** Postgres FTS + ILIKE fallback. No embeddings, no vector store, no semantic similarity. A query that does not lexically match note tokens (or the LLM-rewritten query when that flag is on) will miss.
+1. **Semantic recall now available (hybrid is default).** Retrieval uses Reciprocal Rank Fusion (RRF) over Postgres FTS + Voyage AI vector search (`voyage-4-large`, 1024 dims). The `POST /api/search` endpoint accepts an optional `mode` field (`"lexical"` | `"semantic"` | `"hybrid"`, default `"hybrid"`). `POST /api/context/build` always uses hybrid internally. Notes get embeddings at ingest time; a backfill script covers existing notes. **Caveat:** if `VOYAGE_API_KEY` is not set, hybrid silently falls back to lexical-only and notes are stored with `embedding = NULL`.
 2. **No update / delete endpoints.** Notes are append-only over HTTP. Corrections require ingesting a corrective note.
 3. **No advanced ranking / diversification.** `ts_rank` ordering only; ILIKE fallback hits all share `score: 0.01`. Related-note expansion is one-hop and ranked by share count.
 4. **LLM behavior is gated by env flags.** `interpretQuery` and `synthesize` are off unless `MEMORY_LLM_INTERPRET_QUERY=true` / `MEMORY_LLM_SYNTHESIZE=true`. If Gemini is not configured at all, classification falls back to a near-passthrough stub and entity extraction returns `[]`.

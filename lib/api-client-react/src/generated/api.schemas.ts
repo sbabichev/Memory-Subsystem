@@ -24,6 +24,17 @@ export const NoteType = {
   entity: "entity",
 } as const;
 
+/**
+ * lexical: FTS only; semantic: vector similarity only; hybrid: RRF fusion of FTS + semantic (default)
+ */
+export type SearchMode = (typeof SearchMode)[keyof typeof SearchMode];
+
+export const SearchMode = {
+  lexical: "lexical",
+  semantic: "semantic",
+  hybrid: "hybrid",
+} as const;
+
 export interface Entity {
   id: string;
   /** e.g. person, project, concept, place, organization */
@@ -65,6 +76,8 @@ export interface SearchRequest {
    */
   limit?: number;
   types?: NoteType[] | null;
+  /** Retrieval mode. Defaults to hybrid (RRF fusion of FTS + semantic). Existing clients omitting this field continue to work unchanged. */
+  mode?: SearchMode;
 }
 
 export interface SearchHit {
@@ -76,6 +89,8 @@ export interface SearchResponse {
   query: string;
   /** LLM-rewritten query, when the interpret-query flag is enabled */
   interpretedQuery?: string | null;
+  /** The retrieval mode actually used */
+  searchMode: SearchMode;
   hits: SearchHit[];
 }
 

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { NoteType } from "./noteType";
+import type { SearchMode } from "./searchMode";
 
 export interface SearchRequest {
   /** @minLength 1 */
@@ -16,4 +17,6 @@ export interface SearchRequest {
    */
   limit?: number;
   types?: NoteType[] | null;
+  /** Retrieval mode. Defaults to hybrid (RRF fusion of FTS + semantic). Existing clients omitting this field continue to work unchanged. */
+  mode?: SearchMode;
 }

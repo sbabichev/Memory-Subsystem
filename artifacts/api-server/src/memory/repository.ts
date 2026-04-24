@@ -7,7 +7,7 @@ import {
   noteLinks,
   tenants,
 } from "@workspace/db";
-import { and, eq, inArray, or, sql, desc } from "drizzle-orm";
+import { and, eq, inArray, or, sql, desc, isNull } from "drizzle-orm";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Executor = typeof db | Tx;
@@ -19,7 +19,6 @@ function normalizeName(name: string): string {
 
 // ---------------------------------------------------------------------------
 // Tenant resolution (slug → UUID) with an in-process cache.
-// Slugs are stable, so caching indefinitely is safe.
 // ---------------------------------------------------------------------------
 
 const tenantIdCache = new Map<string, string>();
@@ -62,7 +61,6 @@ export async function ensureTenant(slug: string): Promise<string> {
     tenantIdCache.set(slug, row.id);
     return row.id;
   }
-  // Race: another process inserted it; refetch.
   return getTenantIdBySlug(slug);
 }
 
@@ -120,6 +118,18 @@ export async function insertNote(
     })
     .returning();
   return row;
+}
+
+export async function setNoteEmbedding(
+  noteId: string,
+  tenantId: string,
+  embedding: number[],
+): Promise<void> {
+  const vectorLiteral = `[${embedding.join(",")}]`;
+  await db
+    .update(notes)
+    .set({ embedding: sql.raw(`'${vectorLiteral}'::vector`) as unknown as number[] })
+    .where(and(eq(notes.id, noteId), eq(notes.tenantId, tenantId)));
 }
 
 export async function setNoteMarkdownPath(
@@ -258,10 +268,6 @@ export async function findRelatedNoteIds(
 
   const linked = new Set<string>();
 
-  // 1. Notes connected via explicit note_links (either direction).
-  //    Fetch raw link rows first (no tenant filter on the join — the seed IDs
-  //    are already tenant-scoped, but the opposite end may not be).  Then
-  //    explicitly verify candidate IDs belong to tenantId before accepting them.
   const rawLinkRows = await db
     .select({
       from: noteLinks.fromNoteId,
@@ -275,14 +281,12 @@ export async function findRelatedNoteIds(
       ),
     );
 
-  // Collect candidates that are not in the seed set.
   const linkCandidates = new Set<string>();
   for (const r of rawLinkRows) {
     if (!seedNoteIds.includes(r.from)) linkCandidates.add(r.from);
     if (!seedNoteIds.includes(r.to)) linkCandidates.add(r.to);
   }
 
-  // Verify tenant membership — this is the hard isolation guarantee.
   if (linkCandidates.size > 0) {
     const verified = await db
       .select({ id: notes.id })
@@ -296,7 +300,6 @@ export async function findRelatedNoteIds(
     for (const r of verified) linked.add(r.id);
   }
 
-  // 2. Notes that share at least one entity with the seed set (tenant-scoped).
   const seedEntityRows = await db
     .select({ entityId: noteEntities.entityId })
     .from(noteEntities)
@@ -385,4 +388,85 @@ export async function ftsSearch(
   }
   const hydrated = await attachEntities(rows.map((r) => r.note), opts.tenantId);
   return hydrated.map((n, i) => ({ note: n, score: Number(rows[i].score) }));
+}
+
+export async function semanticSearch(
+  queryEmbedding: number[],
+  opts: { limit: number; types?: string[] | null; tenantId: string },
+): Promise<SearchHitRow[]> {
+  const vectorLiteral = `[${queryEmbedding.join(",")}]`;
+  const whereParts = [
+    eq(notes.tenantId, opts.tenantId),
+    sql`${notes.embedding} IS NOT NULL`,
+  ];
+  if (opts.types && opts.types.length > 0) {
+    whereParts.push(inArray(notes.type, opts.types));
+  }
+
+  const rows = await db
+    .select({
+      note: notes,
+      distance: sql<number>`${notes.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)}`.as("distance"),
+    })
+    .from(notes)
+    .where(and(...whereParts))
+    .orderBy(sql`distance`)
+    .limit(opts.limit);
+
+  const hydrated = await attachEntities(rows.map((r) => r.note), opts.tenantId);
+  return hydrated.map((n, i) => ({
+    note: n,
+    score: 1 - Number(rows[i].distance),
+  }));
+}
+
+/** Reciprocal Rank Fusion over two hit lists. k=60 per standard. */
+export function rrfFuse(
+  ftsHits: SearchHitRow[],
+  semanticHits: SearchHitRow[],
+  limit: number,
+  k = 60,
+): SearchHitRow[] {
+  const scores = new Map<string, { hit: SearchHitRow; score: number }>();
+
+  const addHits = (hits: SearchHitRow[]) => {
+    hits.forEach((hit, rank) => {
+      const id = hit.note.id;
+      const existing = scores.get(id);
+      const rrfScore = 1 / (k + rank + 1);
+      if (existing) {
+        existing.score += rrfScore;
+      } else {
+        scores.set(id, { hit, score: rrfScore });
+      }
+    });
+  };
+
+  addHits(ftsHits);
+  addHits(semanticHits);
+
+  return Array.from(scores.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((entry) => ({ note: entry.hit.note, score: entry.score }));
+}
+
+export async function getNotesWithNullEmbedding(
+  limit: number,
+  offset: number,
+): Promise<{ id: string; tenantId: string; title: string; body: string; summary: string | null }[]> {
+  const rows = await db
+    .select({
+      id: notes.id,
+      tenantId: notes.tenantId,
+      title: notes.title,
+      body: notes.body,
+      summary: notes.summary,
+    })
+    .from(notes)
+    .where(isNull(notes.embedding))
+    .orderBy(notes.createdAt)
+    .limit(limit)
+    .offset(offset);
+  return rows;
 }

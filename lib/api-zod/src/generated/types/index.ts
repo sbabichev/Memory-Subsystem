@@ -18,5 +18,6 @@ export * from "./ingestTextResponse";
 export * from "./note";
 export * from "./noteType";
 export * from "./searchHit";
+export * from "./searchMode";
 export * from "./searchRequest";
 export * from "./searchResponse";

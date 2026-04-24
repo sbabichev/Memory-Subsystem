@@ -9,11 +9,14 @@ import {
   insertRawItem,
   linkNoteEntities,
   setNoteMarkdownPath,
+  setNoteEmbedding,
   upsertEntities,
   type NoteWithEntities,
 } from "./repository";
 import { getRetriever } from "./retriever";
 import { notesBundleMarkdown, writeNoteMarkdown } from "./markdownStore";
+import { embedText } from "./voyage-client";
+import { logger } from "../lib/logger";
 
 function serializeNote(n: NoteWithEntities) {
   return {
@@ -27,6 +30,27 @@ function serializeNote(n: NoteWithEntities) {
     createdAt: n.createdAt,
     entities: n.entities,
   };
+}
+
+function buildEmbeddingInput(note: { title: string; body: string; summary: string | null }): string {
+  return [note.title, note.summary ?? "", note.body].filter(Boolean).join("\n");
+}
+
+async function embedNoteAfterIngest(
+  noteId: string,
+  tenantId: string,
+  note: { title: string; body: string; summary: string | null },
+): Promise<void> {
+  try {
+    if (!process.env.VOYAGE_API_KEY) {
+      return;
+    }
+    const input = buildEmbeddingInput(note);
+    const result = await embedText(input, "document");
+    await setNoteEmbedding(noteId, tenantId, result.embedding);
+  } catch (err) {
+    logger.warn({ err, noteId }, "embed-on-ingest: failed to embed note, leaving embedding NULL");
+  }
 }
 
 export async function ingestText(
@@ -89,6 +113,11 @@ export async function ingestText(
     if (mdPath) {
       await setNoteMarkdownPath(n.id, tenantId, mdPath);
     }
+    await embedNoteAfterIngest(n.id, tenantId, {
+      title: n.title,
+      body: n.body,
+      summary: n.summary,
+    });
   }
 
   return {
@@ -108,6 +137,7 @@ export async function searchNotes(
     query: string;
     limit?: number;
     types?: string[] | null;
+    mode?: "lexical" | "semantic" | "hybrid";
   },
   tenantSlug: string,
 ) {
@@ -115,17 +145,23 @@ export async function searchNotes(
   const llm = getLLMClient();
   const retriever = getRetriever();
   const limit = input.limit ?? 10;
+  const mode = (input.mode ?? "hybrid") as "lexical" | "semantic" | "hybrid";
+
   const interpreted = await llm.interpretQuery(input.query);
   const effective = interpreted ?? input.query;
-  const hits = await retriever.search(effective, {
+
+  const result = await retriever.search(effective, {
     limit,
     types: input.types ?? null,
     tenantId,
+    mode,
   });
+
   return {
     query: input.query,
     interpretedQuery: interpreted,
-    hits: hits.map((h) => ({ note: serializeNote(h.note), score: h.score })),
+    searchMode: result.effectiveMode,
+    hits: result.hits.map((h) => ({ note: serializeNote(h.note), score: h.score })),
   };
 }
 
@@ -144,11 +180,13 @@ export async function buildContext(
   const limit = input.limit ?? 8;
   const interpreted = await llm.interpretQuery(input.query);
   const effective = interpreted ?? input.query;
-  const directHits = await retriever.search(effective, {
+  const searchResult = await retriever.search(effective, {
     limit,
     types: input.types ?? null,
     tenantId,
+    mode: "hybrid",
   });
+  const directHits = searchResult.hits;
 
   const seedIds = directHits.map((h) => h.note.id);
   const relatedExtra = Math.max(2, Math.floor(limit / 2));
@@ -208,6 +246,11 @@ export async function buildContext(
       };
       const synPath = await writeNoteMarkdown(full, tenantSlug, tenantId);
       if (synPath) await setNoteMarkdownPath(full.id, tenantId, synPath);
+      await embedNoteAfterIngest(full.id, tenantId, {
+        title: full.title,
+        body: full.body,
+        summary: full.summary,
+      });
       synthesisNote = serializeNote(full);
     }
   }

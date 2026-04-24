@@ -17,6 +17,22 @@ const tsvector = customType<{ data: string; driverData: string }>({
   },
 });
 
+export const vector = customType<{ data: number[]; driverData: string; config: { dimensions: number } }>({
+  dataType(config) {
+    return `vector(${config?.dimensions ?? 1536})`;
+  },
+  toDriver(value: number[]): string {
+    return `[${value.join(",")}]`;
+  },
+  fromDriver(value: string): number[] {
+    return value
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .split(",")
+      .map(Number);
+  },
+});
+
 export const tenants = pgTable("tenants", {
   id: uuid("id").primaryKey().defaultRandom(),
   slug: text("slug").notNull().unique(),
@@ -59,6 +75,7 @@ export const notes = pgTable(
     }),
     markdownPath: text("markdown_path"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    embedding: vector("embedding", { dimensions: 1024 }),
     searchVector: tsvector("search_vector").generatedAlwaysAs(
       sql`to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'') || ' ' || coalesce(summary,''))`,
     ),
@@ -71,6 +88,9 @@ export const notes = pgTable(
     index("notes_type_idx").on(t.type),
     index("notes_source_item_idx").on(t.sourceItemId),
     index("notes_tenant_idx").on(t.tenantId),
+    index("notes_embedding_hnsw_idx")
+      .using("hnsw", t.embedding.op("vector_cosine_ops"))
+      .with({ m: 16, ef_construction: 64 }),
   ],
 );
 
