@@ -1,0 +1,73 @@
+# Задача: добавить семантический поиск в БЗ через pgvector и Voyage AI
+
+## Контекст проекта
+Это TypeScript monorepo с Drizzle ORM и PostgreSQL. Memory-схема находится
+в `lib/db/src/schema/memory.ts` и содержит таблицы: raw_items, notes (с типами
+raw_source, note, insight, decision, synthesis, entity), entities, note_entities,
+note_links. REST API живёт в `artifacts/api-server/src/routes/memory.ts`
+с endpoints: POST /api/ingest/text, POST /api/search, POST /api/context/build,
+GET /api/notes/:id.
+
+Сейчас поиск работает только через Postgres FTS (tsvector, английская
+конфигурация) с опциональным LLM-переписыванием запроса. FTS плохо справляется
+с русскоязычным разговорным вводом и кросс-языковыми запросами.
+
+## Цель
+1. pgvector extension и колонка `embedding` в notes
+2. Автоматическая генерация эмбеддингов через Voyage AI при ingest
+3. Backfill для существующих notes
+4. Hybrid search (FTS + semantic через RRF fusion)
+5. Обновить /api/context/build чтобы первичный поиск шёл через hybrid
+6. Расширить /api/search параметром mode: "lexical" | "semantic" | "hybrid" (default "hybrid")
+
+## Технические требования
+
+### Эмбеддинги
+- Модель: voyage-4-large (released 2026-01-15, state-of-the-art multilingual)
+- output_dimension: 1024
+- input_type: "document" при ingest, "query" при поиске
+- Env: VOYAGE_API_KEY
+- Лимиты: до 1000 текстов в списке, до 120K токенов суммарно на запрос
+- Context length: 32K tokens (тексты длиннее — truncation: true)
+- Retry с exponential backoff при 429/5xx
+- Текст для эмбеддинга: `title + "\n" + (summary || "") + "\n" + body`
+- При ошибке эмбеддинга ingest НЕ должен падать — note сохраняется, 
+  embedding=NULL, в логе warning
+
+### Миграция
+- CREATE EXTENSION IF NOT EXISTS vector
+- ALTER TABLE notes ADD COLUMN embedding vector(1024)
+- CREATE INDEX notes_embedding_idx ON notes USING hnsw (embedding vector_cosine_ops)
+- Миграция через Drizzle migrations
+- Обновить schema.ts с custom vector type (drizzle-orm/pg-core + pgvector)
+
+### Backfill скрипт
+- Отдельный npm script: `pnpm --filter <workspace> run backfill:embeddings`
+- Проходит по notes WHERE embedding IS NULL батчами по 100
+- Прогресс-лог каждые 10 батчей
+- Идемпотентный (можно перезапускать)
+- Rate-limit safe (пауза между батчами если словили 429)
+
+### Hybrid search
+- RRF (Reciprocal Rank Fusion) с k=60
+- Берём top-50 FTS хитов и top-50 semantic хитов
+- Сливаем по RRF, возвращаем top-N (N = limit из запроса)
+- Semantic: `SELECT ... ORDER BY embedding <=> $query_embedding LIMIT 50`
+- БЕЗ абсолютного threshold на cosine. Только ранжирование top-K.
+  Voyage cosine values ниже чем у OpenAI (typical best match ~0.4-0.6),
+  жёсткий порог отсечёт валидные хиты.
+
+### API изменения
+- POST /api/search: добавить опциональный `mode` (default "hybrid")
+- POST /api/context/build: внутренний поиск использует hybrid, API не меняется
+- В ответе search добавить поле `searchMode`
+- Обратная совместимость: существующие клиенты работают
+
+### Логи и метрики
+- При каждом поиске: mode, latency FTS, latency semantic, latency RRF
+- При embedding-вызовах: dimensions, latency, token count
+
+## Deliverables
+1. Миграция Drizzle с pgvector
+2. Модуль voyage-client.ts (вызовы API, батчинг, retry)
+3. Интеграция embedding-генерации в PO
