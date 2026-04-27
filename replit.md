@@ -45,10 +45,29 @@ A modular memory subsystem for an AI-oriented architecture. Ingests text, classi
 - `artifacts/api-server: API Server` — Express server (port 8080, mounted at `/api`).
 - `artifacts/inspector: web` — Vite dev server for the inspector UI (mounted at `/`).
 
+## Database setup
+
+Run the following command to set up (or recover) the schema on any environment:
+
+```
+pnpm --filter @workspace/db run setup
+```
+
+This single command is fully idempotent and runs the canonical steps in order:
+1. Enable `vector` (pgvector) extension
+2. `drizzle-kit push --force` — create / reconcile all tables
+3. `setup-pgvector` — create the HNSW cosine index on `notes.embedding`
+4. `migrate-tenants` — backfill `tenant_id` on pre-existing rows, add FK constraints and indexes
+
+**Startup guard**: if required tables are missing when the server starts, it exits immediately with a `FATAL` log listing the missing tables — no more silent 500s per request. Run `setup` to fix, then restart.
+
+`GET /api/healthz` also performs a read-only schema check and returns HTTP 503 with a `reason` field if any required table is absent.
+
 ## Useful commands
 
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate Zod + React hooks from OpenAPI.
-- `pnpm --filter @workspace/db run push` — sync Drizzle schema to Postgres.
+- `pnpm --filter @workspace/db run setup` — one-shot idempotent database setup (extension + tables + indexes). Safe to re-run.
+- `pnpm --filter @workspace/db run push` — sync Drizzle schema to Postgres (dev convenience).
 - `pnpm --filter @workspace/api-server run typecheck`.
 - `pnpm --filter @workspace/api-server run test:unit` — unit tests (RRF fusion, Voyage client mock, embed failure isolation).
 - `pnpm --filter @workspace/api-server run test:isolation` — tenant isolation integration tests (including semantic search isolation).

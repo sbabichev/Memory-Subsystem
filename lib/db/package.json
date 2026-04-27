@@ -11,7 +11,8 @@
     "push": "drizzle-kit push --config ./drizzle.config.ts",
     "push-force": "drizzle-kit push --force --config ./drizzle.config.ts",
     "migrate": "tsx scripts/migrate-tenants.ts",
-    "setup-pgvector": "tsx scripts/setup-pgvector.ts"
+    "setup-pgvector": "tsx scripts/setup-pgvector.ts",
+    "setup": "tsx scripts/setup.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
