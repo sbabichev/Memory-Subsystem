@@ -17,6 +17,7 @@ import {
   ensureTenant,
   insertRawItem,
   insertNote,
+  insertNoteLinks,
   linkNoteEntities,
   upsertEntities,
   getNoteById,
@@ -106,7 +107,7 @@ async function testFtsSearch() {
 async function testRelatedExpansion() {
   // Simulate what buildContext does: seed = tenant B's notes, expand related.
   const related = await findRelatedNoteIds([noteBId], { limit: 20 }, tenantBId);
-  const leaked = related.includes(noteAId);
+  const leaked = related.some((h) => h.id === noteAId);
   assert.equal(leaked, false, "findRelatedNoteIds must NOT return Tenant A's note when called as Tenant B");
 
   // Also verify getNotesByIds with a cross-tenant id returns nothing.
@@ -186,7 +187,7 @@ async function testCrossTenantNoteLinksRegression() {
 
   try {
     const related = await findRelatedNoteIds([noteBId], { limit: 20 }, tenantBId);
-    const leaked = related.includes(noteAId);
+    const leaked = related.some((h) => h.id === noteAId);
     assert.equal(
       leaked,
       false,
@@ -200,6 +201,35 @@ async function testCrossTenantNoteLinksRegression() {
   }
 
   console.log("  ✓ cross-tenant note_links edge regression");
+}
+
+async function testInsertNoteLinksRejectsCrossTenantEdge() {
+  // Regression: insertNoteLinks must not persist edges where one endpoint
+  // belongs to a different tenant, even if the LLM hallucinates such a pair.
+  // We call insertNoteLinks as tenant B, passing a link from B's note → A's note.
+  await db.transaction(async (tx) => {
+    await insertNoteLinks(tx, tenantBId, [
+      { fromId: noteBId, toId: noteAId, relation: "references" },
+    ]);
+  });
+
+  // Verify the cross-tenant edge was NOT inserted.
+  const rows = await db
+    .select()
+    .from(noteLinks)
+    .where(
+      and(
+        eq(noteLinks.fromNoteId, noteBId),
+        eq(noteLinks.toNoteId, noteAId),
+      ),
+    );
+  assert.equal(
+    rows.length,
+    0,
+    "insertNoteLinks must NOT persist a cross-tenant edge (B→A) when called as tenant B",
+  );
+
+  console.log("  ✓ insertNoteLinks cross-tenant edge rejection");
 }
 
 async function cleanup() {
@@ -222,6 +252,7 @@ async function main() {
     await testCrossTenantNoteEntitiesRegression();
     await testSemanticSearchIsolation();
     await testCrossTenantNoteLinksRegression();
+    await testInsertNoteLinksRejectsCrossTenantEdge();
     console.log("\nAll tenant isolation tests passed.");
   } finally {
     await cleanup();

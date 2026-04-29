@@ -21,6 +21,31 @@ export type ExtractedEntity = {
   name: string;
 };
 
+export const NOTE_RELATION_TYPES = [
+  "mentions_same_person",
+  "same_event",
+  "follow_up_to",
+  "contradicts",
+  "references",
+] as const;
+
+export type NoteRelationType = (typeof NOTE_RELATION_TYPES)[number];
+
+export type NoteRelationCandidate = {
+  id: string;
+  title: string;
+  body: string;
+  summary?: string | null;
+  entities: { type: string; name: string }[];
+};
+
+export type ExtractedNoteRelation = {
+  fromId: string;
+  toId: string;
+  relation: NoteRelationType;
+  confidence: number;
+};
+
 export interface LLMClient {
   classifyNotes(
     text: string,
@@ -32,6 +57,14 @@ export interface LLMClient {
     query: string,
     bundleMarkdown: string,
   ): Promise<{ title: string; body: string; summary: string } | null>;
+  /**
+   * Given a list of note candidates, identify typed relationships between them.
+   * Returns only pairs where the LLM is confident a relation exists.
+   * Can be reused by future update flows (e.g. when editing a note).
+   */
+  extractNoteRelations(
+    notes: NoteRelationCandidate[],
+  ): Promise<ExtractedNoteRelation[]>;
 }
 
 function tryParseJson<T>(raw: string): T | null {
@@ -183,6 +216,60 @@ ${text}
       return null;
     }
   }
+
+  async extractNoteRelations(
+    noteCandidates: NoteRelationCandidate[],
+  ): Promise<ExtractedNoteRelation[]> {
+    if (noteCandidates.length < 2) return [];
+    const noteList = noteCandidates
+      .map(
+        (n) =>
+          `ID: ${n.id}\nTitle: ${n.title}\nSummary: ${n.summary ?? ""}\nEntities: ${n.entities.map((e) => `${e.type}:${e.name}`).join(", ")}\nBody (excerpt): ${n.body.slice(0, 300)}`,
+      )
+      .join("\n\n---\n\n");
+
+    const allowedTypes = NOTE_RELATION_TYPES.join(", ");
+    const prompt = `You are analyzing a set of notes to find meaningful typed relationships between them.
+
+Allowed relation types: ${allowedTypes}
+- mentions_same_person: both notes refer to the same individual
+- same_event: both notes describe or stem from the same event/meeting
+- follow_up_to: one note is a follow-up, update, or continuation of another
+- contradicts: the notes express conflicting information
+- references: one note explicitly mentions or cites content from another
+
+For each pair of notes that has a clear, confident relationship, output a JSON object with:
+- "fromId": id of the source note
+- "toId": id of the target note
+- "relation": one of the allowed types
+- "confidence": a number 0.0–1.0
+
+Return ONLY a JSON array. Return [] if no confident relationships exist. Do not invent relationships.
+
+NOTES:
+${noteList}`;
+
+    try {
+      const raw = await this.generate(prompt);
+      const parsed = tryParseJson<ExtractedNoteRelation[]>(raw);
+      if (!Array.isArray(parsed)) return [];
+      const validRelations = new Set<string>(NOTE_RELATION_TYPES);
+      return parsed.filter(
+        (r) =>
+          r &&
+          typeof r.fromId === "string" &&
+          typeof r.toId === "string" &&
+          typeof r.relation === "string" &&
+          validRelations.has(r.relation) &&
+          r.fromId !== r.toId &&
+          typeof r.confidence === "number" &&
+          r.confidence >= 0.5,
+      );
+    } catch (err) {
+      logger.warn({ err }, "extractNoteRelations (gemini) failed");
+      return [];
+    }
+  }
 }
 
 class StubLLMClient implements LLMClient {
@@ -213,6 +300,11 @@ class StubLLMClient implements LLMClient {
     _bundleMarkdown: string,
   ): Promise<{ title: string; body: string; summary: string } | null> {
     return null;
+  }
+  async extractNoteRelations(
+    _notes: NoteRelationCandidate[],
+  ): Promise<ExtractedNoteRelation[]> {
+    return [];
   }
 }
 

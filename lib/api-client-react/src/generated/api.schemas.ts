@@ -122,6 +122,10 @@ export interface ContextHit {
   score: number;
   /** direct: matched by retriever; related: pulled in via note_links or shared entities */
   via: ContextHitVia;
+  /** The typed relation that caused this hit to be included (only set when via=related and the hit came from note_links) */
+  relation?: string | null;
+  /** The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links) */
+  viaNoteId?: string | null;
 }
 
 export interface BuildContextResponse {

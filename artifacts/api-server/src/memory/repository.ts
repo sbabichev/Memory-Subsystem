@@ -191,6 +191,44 @@ export async function linkNoteEntities(
     .onConflictDoNothing();
 }
 
+/**
+ * Insert typed note↔note links, verifying both endpoints belong to `tenantId`.
+ * Guards against cross-tenant edges even if the caller supplies incorrect IDs.
+ * Uses onConflictDoNothing on PK (fromNoteId, toNoteId, relation).
+ *
+ * NOTE: Reuse this function in future note-update flows.
+ */
+export async function insertNoteLinks(
+  tx: Executor,
+  tenantId: string,
+  links: { fromId: string; toId: string; relation: string }[],
+): Promise<void> {
+  if (links.length === 0) return;
+
+  const allNoteIds = Array.from(new Set(links.flatMap((l) => [l.fromId, l.toId])));
+  const verifiedRows = await tx
+    .select({ id: notes.id })
+    .from(notes)
+    .where(and(inArray(notes.id, allNoteIds), eq(notes.tenantId, tenantId)));
+  const verifiedIds = new Set(verifiedRows.map((r) => r.id));
+
+  const safe = links.filter(
+    (l) => verifiedIds.has(l.fromId) && verifiedIds.has(l.toId),
+  );
+  if (safe.length === 0) return;
+
+  await tx
+    .insert(noteLinks)
+    .values(
+      safe.map((l) => ({
+        fromNoteId: l.fromId,
+        toNoteId: l.toId,
+        relation: l.relation,
+      })),
+    )
+    .onConflictDoNothing();
+}
+
 // ---------------------------------------------------------------------------
 // Reads (all scoped to tenantId)
 // ---------------------------------------------------------------------------
@@ -259,19 +297,28 @@ export async function getNotesByIds(ids: string[], tenantId: string): Promise<No
   return attachEntities(rows, tenantId);
 }
 
+export type RelatedNoteHit = {
+  id: string;
+  /** The typed relation from note_links, or "shared_entity" for entity-overlap expansion */
+  relation: string;
+  /** The seed note ID that this related note was linked from, or null for entity expansion */
+  viaNoteId: string | null;
+};
+
 export async function findRelatedNoteIds(
   seedNoteIds: string[],
   opts: { limit: number },
   tenantId: string,
-): Promise<string[]> {
+): Promise<RelatedNoteHit[]> {
   if (seedNoteIds.length === 0) return [];
 
-  const linked = new Set<string>();
+  const linked = new Map<string, RelatedNoteHit>();
 
   const rawLinkRows = await db
     .select({
       from: noteLinks.fromNoteId,
       to: noteLinks.toNoteId,
+      relation: noteLinks.relation,
     })
     .from(noteLinks)
     .where(
@@ -281,10 +328,16 @@ export async function findRelatedNoteIds(
       ),
     );
 
-  const linkCandidates = new Set<string>();
+  const linkCandidates = new Map<string, { relation: string; viaNoteId: string }>();
   for (const r of rawLinkRows) {
-    if (!seedNoteIds.includes(r.from)) linkCandidates.add(r.from);
-    if (!seedNoteIds.includes(r.to)) linkCandidates.add(r.to);
+    const isFromSeed = seedNoteIds.includes(r.from);
+    const isToSeed = seedNoteIds.includes(r.to);
+    if (!isToSeed) {
+      linkCandidates.set(r.to, { relation: r.relation, viaNoteId: r.from });
+    }
+    if (!isFromSeed) {
+      linkCandidates.set(r.from, { relation: r.relation, viaNoteId: r.to });
+    }
   }
 
   if (linkCandidates.size > 0) {
@@ -293,11 +346,14 @@ export async function findRelatedNoteIds(
       .from(notes)
       .where(
         and(
-          inArray(notes.id, Array.from(linkCandidates)),
+          inArray(notes.id, Array.from(linkCandidates.keys())),
           eq(notes.tenantId, tenantId),
         ),
       );
-    for (const r of verified) linked.add(r.id);
+    for (const r of verified) {
+      const meta = linkCandidates.get(r.id)!;
+      linked.set(r.id, { id: r.id, relation: meta.relation, viaNoteId: meta.viaNoteId });
+    }
   }
 
   const seedEntityRows = await db
@@ -333,11 +389,54 @@ export async function findRelatedNoteIds(
       .orderBy(desc(sql`cnt`))
       .limit(opts.limit * 2);
     for (const r of sharedRows) {
-      linked.add(r.noteId);
+      if (!linked.has(r.noteId)) {
+        linked.set(r.noteId, { id: r.noteId, relation: "shared_entity", viaNoteId: null });
+      }
     }
   }
 
-  return Array.from(linked).slice(0, opts.limit);
+  return Array.from(linked.values()).slice(0, opts.limit);
+}
+
+/**
+ * Find existing note IDs in a tenant that share at least `minShared` entities
+ * with any of the given entity IDs. Used to build cross-batch candidates for
+ * link extraction during ingest.
+ */
+export async function findNotesWithSharedEntities(
+  tenantId: string,
+  entityIds: string[],
+  opts: { minShared: number; topK: number; excludeIds: string[] },
+): Promise<string[]> {
+  if (entityIds.length === 0) return [];
+
+  const excludeClause =
+    opts.excludeIds.length > 0
+      ? sql`${noteEntities.noteId} <> ALL(${sql.raw(
+          `ARRAY[${opts.excludeIds.map((id) => `'${id}'::uuid`).join(",")}]`,
+        )})`
+      : sql`TRUE`;
+
+  const sharedRows = await db
+    .select({
+      noteId: noteEntities.noteId,
+      cnt: sql<number>`count(distinct ${noteEntities.entityId})`.as("cnt"),
+    })
+    .from(noteEntities)
+    .innerJoin(notes, eq(noteEntities.noteId, notes.id))
+    .where(
+      and(
+        inArray(noteEntities.entityId, entityIds),
+        eq(notes.tenantId, tenantId),
+        excludeClause,
+      ),
+    )
+    .groupBy(noteEntities.noteId)
+    .having(sql`count(distinct ${noteEntities.entityId}) >= ${opts.minShared}`)
+    .orderBy(desc(sql`cnt`))
+    .limit(opts.topK);
+
+  return sharedRows.map((r) => r.noteId);
 }
 
 export type SearchHitRow = { note: NoteWithEntities; score: number };

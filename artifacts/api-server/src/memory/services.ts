@@ -1,11 +1,13 @@
-import { getLLMClient } from "./llm";
+import { getLLMClient, type LLMClient, type NoteRelationCandidate } from "./llm";
 import {
   db,
   ensureTenant,
   getNoteById,
   getNotesByIds,
   findRelatedNoteIds,
+  findNotesWithSharedEntities,
   insertNote,
+  insertNoteLinks,
   insertRawItem,
   linkNoteEntities,
   setNoteMarkdownPath,
@@ -34,6 +36,112 @@ function serializeNote(n: NoteWithEntities) {
 
 function buildEmbeddingInput(note: { title: string; body: string; summary: string | null }): string {
   return [note.title, note.summary ?? "", note.body].filter(Boolean).join("\n");
+}
+
+/**
+ * Minimum number of shared entities required to consider a cross-batch pair
+ * as a link candidate.
+ */
+const CROSS_BATCH_MIN_SHARED_ENTITIES = 2;
+
+/**
+ * Maximum number of cross-batch candidate existing notes to consider per
+ * ingest batch (across all new notes combined).
+ */
+const CROSS_BATCH_TOP_K = 10;
+
+/**
+ * Build and persist typed note↔note links for a set of newly ingested notes.
+ *
+ * This function is intentionally extracted so that future note-update flows
+ * can call it without duplicating logic. To reuse: call
+ * `buildAndPersistNoteLinks(tenantId, updatedNote, llm)` after updating a
+ * note's body/entities, passing the updated note in the `newNotes` array.
+ *
+ * @param tenantId - the tenant that owns all notes
+ * @param newNotes - notes just created (already have entity data)
+ * @param llm     - LLM client (injected so callers can override)
+ */
+async function buildAndPersistNoteLinks(
+  tenantId: string,
+  newNotes: NoteWithEntities[],
+  llm: LLMClient,
+): Promise<void> {
+  if (newNotes.length === 0) return;
+
+  try {
+    const newNoteIds = newNotes.map((n) => n.id);
+
+    const newNoteIdsSet = new Set(newNoteIds);
+
+    const existingCandidateIdsSet = new Set<string>();
+    for (const n of newNotes) {
+      const entityIds = n.entities.map((e) => e.id);
+      if (entityIds.length === 0) continue;
+      const perNoteCandidates = await findNotesWithSharedEntities(
+        tenantId,
+        entityIds,
+        {
+          minShared: CROSS_BATCH_MIN_SHARED_ENTITIES,
+          topK: CROSS_BATCH_TOP_K,
+          excludeIds: newNoteIds,
+        },
+      );
+      for (const id of perNoteCandidates) existingCandidateIdsSet.add(id);
+    }
+
+    let existingCandidates: NoteWithEntities[] = [];
+    const existingCandidateIds = Array.from(existingCandidateIdsSet);
+    if (existingCandidateIds.length > 0) {
+      existingCandidates = await getNotesByIds(existingCandidateIds, tenantId);
+    }
+
+    const allCandidates: NoteRelationCandidate[] = [
+      ...newNotes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        summary: n.summary,
+        entities: n.entities,
+      })),
+      ...existingCandidates.map((n) => ({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        summary: n.summary,
+        entities: n.entities,
+      })),
+    ];
+
+    if (allCandidates.length < 2) return;
+
+    const relations = await llm.extractNoteRelations(allCandidates);
+    if (relations.length === 0) return;
+
+    const relationsInvolvingNewNote = relations.filter(
+      (r) => newNoteIdsSet.has(r.fromId) || newNoteIdsSet.has(r.toId),
+    );
+    if (relationsInvolvingNewNote.length === 0) return;
+
+    await db.transaction(async (tx) => {
+      await insertNoteLinks(
+        tx,
+        tenantId,
+        relationsInvolvingNewNote.map((r) => ({
+          fromId: r.fromId,
+          toId: r.toId,
+          relation: r.relation,
+        })),
+      );
+    });
+
+    logger.info(
+      { tenantId, count: relations.length },
+      "buildAndPersistNoteLinks: inserted note links",
+    );
+  } catch (err) {
+    logger.warn({ err, tenantId }, "buildAndPersistNoteLinks: failed, skipping links");
+  }
 }
 
 async function embedNoteAfterIngest(
@@ -120,6 +228,8 @@ export async function ingestText(
     });
   }
 
+  await buildAndPersistNoteLinks(tenantId, persisted.notes, llm);
+
   return {
     rawItemId: persisted.rawId,
     notes: persisted.notes.map(serializeNote),
@@ -190,11 +300,13 @@ export async function buildContext(
 
   const seedIds = directHits.map((h) => h.note.id);
   const relatedExtra = Math.max(2, Math.floor(limit / 2));
-  const relatedIds = await findRelatedNoteIds(seedIds, { limit: relatedExtra }, tenantId);
+  const relatedHits = await findRelatedNoteIds(seedIds, { limit: relatedExtra }, tenantId);
+  const relatedHitsFiltered = relatedHits.filter((h) => !seedIds.includes(h.id));
   const relatedNotes = await getNotesByIds(
-    relatedIds.filter((id) => !seedIds.includes(id)),
+    relatedHitsFiltered.map((h) => h.id),
     tenantId,
   );
+  const relatedMetaMap = new Map(relatedHitsFiltered.map((h) => [h.id, h]));
 
   const allNotes: NoteWithEntities[] = [
     ...directHits.map((h) => h.note),
@@ -208,11 +320,16 @@ export async function buildContext(
       score: h.score,
       via: "direct" as const,
     })),
-    ...relatedNotes.map((n) => ({
-      note: serializeNote(n),
-      score: 0,
-      via: "related" as const,
-    })),
+    ...relatedNotes.map((n) => {
+      const meta = relatedMetaMap.get(n.id);
+      return {
+        note: serializeNote(n),
+        score: 0,
+        via: "related" as const,
+        relation: meta?.relation,
+        viaNoteId: meta?.viaNoteId ?? undefined,
+      };
+    }),
   ];
 
   let synthesisNote: ReturnType<typeof serializeNote> | null = null;

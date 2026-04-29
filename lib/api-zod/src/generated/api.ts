@@ -246,6 +246,18 @@ export const BuildContextResponse = zod.object({
         .describe(
           "direct: matched by retriever; related: pulled in via note_links or shared entities",
         ),
+      relation: zod
+        .string()
+        .nullish()
+        .describe(
+          "The typed relation that caused this hit to be included (only set when via=related and the hit came from note_links)",
+        ),
+      viaNoteId: zod
+        .string()
+        .nullish()
+        .describe(
+          "The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links)",
+        ),
     }),
   ),
   bundleMarkdown: zod
