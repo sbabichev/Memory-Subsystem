@@ -89,9 +89,11 @@ export const notes = pgTable(
     index("notes_type_idx").on(t.type),
     index("notes_source_item_idx").on(t.sourceItemId),
     index("notes_tenant_idx").on(t.tenantId),
-    index("notes_embedding_hnsw_idx")
-      .using("hnsw", t.embedding.op("vector_cosine_ops"))
-      .with({ m: 16, ef_construction: 64 }),
+    // NOTE: HNSW index on `embedding` (vector_cosine_ops) is intentionally
+    // NOT declared here. Replit's deploy migration validator runs before the
+    // build step, so it would try to create this index before pgvector is
+    // enabled and fail. The index is created idempotently by
+    // `lib/db/scripts/setup-pgvector.ts`, which runs after CREATE EXTENSION.
   ],
 );
 
