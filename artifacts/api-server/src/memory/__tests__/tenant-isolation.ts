@@ -28,6 +28,7 @@ import {
   getNotesByIds,
   findRelatedNoteIds,
   findOverlappingEntities,
+  queryEntityRelations,
 } from "../repository.js";
 
 const RUN_ID = Date.now().toString(36);
@@ -294,6 +295,124 @@ async function testEntityRelationsCrossTenantIsolation() {
   }
 }
 
+async function testQueryEntityRelationsCrossTenantIsolation() {
+  // Setup: create a relation in tenant A: "Alice Iso" works_at "AcmeIso".
+  let entAPersonId = "";
+  let entAOrgId = "";
+  let noteAIsoId = "";
+
+  await db.transaction(async (tx) => {
+    const ents = await upsertEntities(tx, tenantAId, [
+      { type: "person", name: "Alice Iso" },
+      { type: "organization", name: "AcmeIso" },
+    ]);
+    entAPersonId = ents.find((e) => e.name === "Alice Iso")!.id;
+    entAOrgId = ents.find((e) => e.name === "AcmeIso")!.id;
+    const nA = await insertNote(tx, {
+      tenantId: tenantAId,
+      type: "note",
+      title: "Alice Iso at AcmeIso",
+      body: "Alice Iso works at AcmeIso.",
+      tags: [],
+    });
+    noteAIsoId = nA.id;
+    await linkNoteEntities(tx, nA.id, [entAPersonId, entAOrgId]);
+    await upsertEntityRelations(
+      tx,
+      tenantAId,
+      [{ fromEntityId: entAPersonId, toEntityId: entAOrgId, relation: "works_at", confidence: 0.9 }],
+      nA.id,
+    );
+  });
+
+  // Querying as tenant B by the entity name "AcmeIso" must return nothing,
+  // even though tenant A has a matching entity and relation.
+  const asB = await queryEntityRelations(tenantBId, {
+    entityName: "AcmeIso",
+    relation: "works_at",
+    direction: "incoming",
+    limit: 50,
+  });
+  assert.equal(
+    asB.length,
+    0,
+    "queryEntityRelations must NOT return tenant A's relations when called as tenant B",
+  );
+
+  // Sanity: tenant A sees its own relation.
+  const asA = await queryEntityRelations(tenantAId, {
+    entityName: "AcmeIso",
+    relation: "works_at",
+    direction: "incoming",
+    limit: 50,
+  });
+  assert.equal(asA.length, 1, "tenant A should see its own works_at relation");
+  assert.equal(asA[0].from.name, "Alice Iso");
+  assert.equal(asA[0].to.name, "AcmeIso");
+  assert.equal(asA[0].sourceNoteId, noteAIsoId);
+
+  // Unfiltered tenant B query must not include any of tenant A's edges.
+  const allB = await queryEntityRelations(tenantBId, { limit: 200 });
+  const leaked = allB.some(
+    (r) => r.from.id === entAPersonId || r.to.id === entAOrgId,
+  );
+  assert.equal(leaked, false, "unfiltered tenant B query must not leak tenant A entities");
+
+  // Invalid relation type must short-circuit to empty (not throw, not leak).
+  const invalid = await queryEntityRelations(tenantAId, {
+    relation: "not_a_real_relation",
+    limit: 50,
+  });
+  assert.equal(invalid.length, 0, "unknown relation type must return empty");
+
+  // Defense-in-depth: simulate a stray cross-tenant edge by inserting
+  // directly into entity_relations (bypassing upsertEntityRelations' guards).
+  // queryEntityRelations must still not surface it, because the joined
+  // endpoint entities are required to belong to the caller's tenant.
+  let entBPersonId = "";
+  await db.transaction(async (tx) => {
+    const ents = await upsertEntities(tx, tenantBId, [
+      { type: "person", name: "Bob Iso" },
+    ]);
+    entBPersonId = ents[0].id;
+  });
+  await db.insert(entityRelations).values({
+    tenantId: tenantBId,
+    fromEntityId: entBPersonId,
+    toEntityId: entAOrgId, // belongs to tenant A
+    relation: "works_at",
+    sourceNoteId: null,
+    confidence: 1,
+  });
+  const strayB = await queryEntityRelations(tenantBId, {
+    relation: "works_at",
+    limit: 50,
+  });
+  const strayLeaked = strayB.some(
+    (r) => r.from.id === entBPersonId && r.to.id === entAOrgId,
+  );
+  assert.equal(
+    strayLeaked,
+    false,
+    "queryEntityRelations must reject stray cross-tenant edges via joined-entity tenant filters",
+  );
+
+  console.log("  ✓ queryEntityRelations cross-tenant isolation");
+
+  // Cleanup the extra rows created here.
+  await db
+    .delete(entityRelations)
+    .where(
+      and(
+        eq(entityRelations.fromEntityId, entBPersonId),
+        eq(entityRelations.toEntityId, entAOrgId),
+      ),
+    );
+  if (noteAIsoId) {
+    await db.delete(notes).where(eq(notes.id, noteAIsoId));
+  }
+}
+
 async function testInsertNoteLinksRejectsCrossTenantEdge() {
   // Regression: insertNoteLinks must not persist edges where one endpoint
   // belongs to a different tenant, even if the LLM hallucinates such a pair.
@@ -476,6 +595,7 @@ async function main() {
     await testInsertNoteLinksRejectsCrossTenantEdge();
     await testEntityRelationsCrossTenantIsolation();
     await testFindOverlappingEntitiesIsolationAndOverlap();
+    await testQueryEntityRelationsCrossTenantIsolation();
     console.log("\nAll tenant isolation tests passed.");
   } finally {
     await cleanup();

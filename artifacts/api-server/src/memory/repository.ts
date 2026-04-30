@@ -9,6 +9,7 @@ import {
   tenants,
 } from "@workspace/db";
 import { and, eq, inArray, not, or, sql, desc, isNull } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Executor = typeof db | Tx;
@@ -829,6 +830,136 @@ export function rrfFuse(
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((entry) => ({ note: entry.hit.note, score: entry.score }));
+}
+
+// ---------------------------------------------------------------------------
+// Entity graph queries
+// ---------------------------------------------------------------------------
+
+export type EntityRelationHit = {
+  relation: string;
+  from: { id: string; type: string; name: string };
+  to: { id: string; type: string; name: string };
+  sourceNoteId: string | null;
+  confidence: number;
+  createdAt: Date;
+};
+
+/**
+ * Query typed entity↔entity relations, scoped to a tenant.
+ *
+ * Filters:
+ *   - `entityName`: matches normalized name on either endpoint (controlled by `direction`).
+ *   - `entityType`: filters the matched endpoint(s) by entity type.
+ *   - `relation`:   exact match on relation type (must be in VALID_ENTITY_RELATIONS).
+ *   - `direction`:  when `entityName` is given:
+ *                     "outgoing" → entity is the from-side (e.g. "X works_at ?")
+ *                     "incoming" → entity is the to-side   (e.g. "? works_at X")
+ *                     "both"     → either side
+ *                   When `entityName` is omitted, `direction` is ignored.
+ */
+export async function queryEntityRelations(
+  tenantId: string,
+  opts: {
+    entityName?: string | null;
+    entityType?: string | null;
+    relation?: string | null;
+    direction?: "outgoing" | "incoming" | "both";
+    limit: number;
+  },
+): Promise<EntityRelationHit[]> {
+  if (opts.relation && !VALID_ENTITY_RELATIONS.has(opts.relation)) {
+    return [];
+  }
+
+  let matchedEntityIds: string[] | null = null;
+  if (opts.entityName) {
+    const normalized = normalizeName(opts.entityName);
+    const whereParts = [
+      eq(entities.tenantId, tenantId),
+      eq(entities.normalizedName, normalized),
+    ];
+    if (opts.entityType) {
+      whereParts.push(eq(entities.type, opts.entityType));
+    }
+    const matched = await db
+      .select({ id: entities.id })
+      .from(entities)
+      .where(and(...whereParts));
+    matchedEntityIds = matched.map((r) => r.id);
+    if (matchedEntityIds.length === 0) return [];
+  }
+
+  const direction = opts.direction ?? "both";
+  const whereParts = [eq(entityRelations.tenantId, tenantId)];
+
+  if (matchedEntityIds) {
+    if (direction === "outgoing") {
+      whereParts.push(inArray(entityRelations.fromEntityId, matchedEntityIds));
+    } else if (direction === "incoming") {
+      whereParts.push(inArray(entityRelations.toEntityId, matchedEntityIds));
+    } else {
+      whereParts.push(
+        or(
+          inArray(entityRelations.fromEntityId, matchedEntityIds),
+          inArray(entityRelations.toEntityId, matchedEntityIds),
+        )!,
+      );
+    }
+  }
+
+  if (opts.relation) {
+    whereParts.push(eq(entityRelations.relation, opts.relation));
+  }
+
+  const fromEntities = alias(entities, "from_entities");
+  const toEntities = alias(entities, "to_entities");
+
+  // Defensive tenant scoping on the joined endpoints. The write-side guards
+  // in upsertEntityRelations already prevent cross-tenant edges, but
+  // requiring both endpoint entities to belong to the caller's tenant on
+  // read keeps the endpoint safe even if a future write path or migration
+  // ever introduced a stray cross-tenant row.
+  const rows = await db
+    .select({
+      relation: entityRelations.relation,
+      sourceNoteId: entityRelations.sourceNoteId,
+      confidence: entityRelations.confidence,
+      createdAt: entityRelations.createdAt,
+      fromId: entityRelations.fromEntityId,
+      toId: entityRelations.toEntityId,
+      fromType: fromEntities.type,
+      fromName: fromEntities.name,
+      toType: toEntities.type,
+      toName: toEntities.name,
+    })
+    .from(entityRelations)
+    .innerJoin(
+      fromEntities,
+      and(
+        eq(entityRelations.fromEntityId, fromEntities.id),
+        eq(fromEntities.tenantId, tenantId),
+      )!,
+    )
+    .innerJoin(
+      toEntities,
+      and(
+        eq(entityRelations.toEntityId, toEntities.id),
+        eq(toEntities.tenantId, tenantId),
+      )!,
+    )
+    .where(and(...whereParts))
+    .orderBy(desc(entityRelations.confidence), desc(entityRelations.createdAt))
+    .limit(opts.limit);
+
+  return rows.map((r) => ({
+    relation: r.relation,
+    from: { id: r.fromId, type: r.fromType, name: r.fromName },
+    to: { id: r.toId, type: r.toType, name: r.toName },
+    sourceNoteId: r.sourceNoteId,
+    confidence: Number(r.confidence),
+    createdAt: r.createdAt,
+  }));
 }
 
 export async function getNotesWithNullEmbedding(

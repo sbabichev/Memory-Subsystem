@@ -11,6 +11,7 @@ import {
   insertNoteLinks,
   insertRawItem,
   linkNoteEntities,
+  queryEntityRelations,
   setNoteMarkdownPath,
   setNoteEmbedding,
   upsertEntities,
@@ -356,6 +357,43 @@ export async function searchNotes(
     interpretedQuery: interpreted,
     searchMode: result.effectiveMode,
     hits: result.hits.map((h) => ({ note: serializeNote(h.note), score: h.score })),
+  };
+}
+
+export async function queryGraphEntities(
+  input: {
+    entity?: string | null;
+    entityType?: string | null;
+    relation?: string | null;
+    direction?: "outgoing" | "incoming" | "both";
+    limit?: number;
+  },
+  tenantSlug: string,
+) {
+  const tenantId = await ensureTenant(tenantSlug);
+  const limit = input.limit ?? 50;
+  const hits = await queryEntityRelations(tenantId, {
+    entityName: input.entity ?? null,
+    entityType: input.entityType ?? null,
+    relation: input.relation ?? null,
+    direction: input.direction ?? "both",
+    limit,
+  });
+  return {
+    query: {
+      entity: input.entity ?? null,
+      entityType: input.entityType ?? null,
+      relation: input.relation ?? null,
+      direction: (input.direction ?? "both") as "outgoing" | "incoming" | "both",
+    },
+    relations: hits.map((h) => ({
+      relation: h.relation,
+      from: h.from,
+      to: h.to,
+      sourceNoteId: h.sourceNoteId,
+      confidence: h.confidence,
+      createdAt: h.createdAt,
+    })),
   };
 }
 

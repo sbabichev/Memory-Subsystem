@@ -174,6 +174,108 @@ export const SearchNotesResponse = zod.object({
 });
 
 /**
+ * Returns entity relations (e.g. `works_at`, `attended`) scoped to the caller's tenant.
+Use this to answer questions like "who works at Replit?" or "who attended MIT?" without
+going through buildContext. All filters are optional; with no filters, returns the most
+recent/highest-confidence relations for the tenant.
+
+ * @summary Query typed entity↔entity relations directly from the knowledge graph
+ */
+export const queryGraphEntitiesQueryDirectionDefault = `both`;
+export const queryGraphEntitiesQueryLimitDefault = 50;
+export const queryGraphEntitiesQueryLimitMax = 200;
+
+export const QueryGraphEntitiesQueryParams = zod.object({
+  entity: zod.coerce
+    .string()
+    .optional()
+    .describe(
+      'Entity name to anchor the query. Matched case-insensitively against the\nnormalized entity name. Required if you want a meaningful \"who works at X\" answer.\n',
+    ),
+  entityType: zod.coerce
+    .string()
+    .optional()
+    .describe(
+      "Filter the anchor entity by type (e.g. `organization`, `person`).",
+    ),
+  relation: zod
+    .enum([
+      "works_at",
+      "attended",
+      "lives_in",
+      "located_in",
+      "friend_of",
+      "family_of",
+      "colleague_of",
+      "member_of",
+      "created_by",
+      "part_of",
+      "mentions",
+    ])
+    .optional()
+    .describe("Filter by relation type (e.g. `works_at`)."),
+  direction: zod
+    .enum(["outgoing", "incoming", "both"])
+    .default(queryGraphEntitiesQueryDirectionDefault)
+    .describe(
+      'When `entity` is provided, controls which side of the relation it must appear on.\n`outgoing`: entity is the from-side (\"X works_at ?\"). `incoming`: entity is the to-side\n(\"? works_at X\"). `both` (default): either side. Ignored when `entity` is omitted.\n',
+    ),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(queryGraphEntitiesQueryLimitMax)
+    .default(queryGraphEntitiesQueryLimitDefault),
+});
+
+export const QueryGraphEntitiesResponse = zod.object({
+  query: zod.object({
+    entity: zod.string().nullable(),
+    entityType: zod.string().nullable(),
+    relation: zod.string().nullable(),
+    direction: zod.enum(["outgoing", "incoming", "both"]),
+  }),
+  relations: zod.array(
+    zod.object({
+      relation: zod
+        .enum([
+          "works_at",
+          "attended",
+          "lives_in",
+          "located_in",
+          "friend_of",
+          "family_of",
+          "colleague_of",
+          "member_of",
+          "created_by",
+          "part_of",
+          "mentions",
+        ])
+        .describe(
+          "Whitelisted entity↔entity relation types. Keep in sync with the server's VALID_ENTITY_RELATIONS set.",
+        ),
+      from: zod.object({
+        id: zod.string(),
+        type: zod.string(),
+        name: zod.string(),
+      }),
+      to: zod.object({
+        id: zod.string(),
+        type: zod.string(),
+        name: zod.string(),
+      }),
+      sourceNoteId: zod
+        .string()
+        .nullable()
+        .describe(
+          "ID of the note this relation was extracted from, if known. Use it to drill into the evidence.",
+        ),
+      confidence: zod.number().describe("Extraction confidence in [0, 1]."),
+      createdAt: zod.coerce.date(),
+    }),
+  ),
+});
+
+/**
  * @summary Build a context bundle for a downstream agent
  */
 
@@ -257,6 +359,17 @@ export const BuildContextResponse = zod.object({
         .nullish()
         .describe(
           "The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links)",
+        ),
+      viaEntity: zod
+        .object({
+          id: zod.string(),
+          type: zod.string(),
+          name: zod.string(),
+          relation: zod.string(),
+        })
+        .nullish()
+        .describe(
+          "The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion)",
         ),
     }),
   ),

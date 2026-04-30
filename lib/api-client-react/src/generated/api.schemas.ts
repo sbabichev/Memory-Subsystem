@@ -25,6 +25,26 @@ export const NoteType = {
 } as const;
 
 /**
+ * Whitelisted entity↔entity relation types. Keep in sync with the server's VALID_ENTITY_RELATIONS set.
+ */
+export type EntityRelationType =
+  (typeof EntityRelationType)[keyof typeof EntityRelationType];
+
+export const EntityRelationType = {
+  works_at: "works_at",
+  attended: "attended",
+  lives_in: "lives_in",
+  located_in: "located_in",
+  friend_of: "friend_of",
+  family_of: "family_of",
+  colleague_of: "colleague_of",
+  member_of: "member_of",
+  created_by: "created_by",
+  part_of: "part_of",
+  mentions: "mentions",
+} as const;
+
+/**
  * lexical: FTS only; semantic: vector similarity only; hybrid: RRF fusion of FTS + semantic (default)
  */
 export type SearchMode = (typeof SearchMode)[keyof typeof SearchMode];
@@ -117,6 +137,16 @@ export const ContextHitVia = {
   related: "related",
 } as const;
 
+/**
+ * The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion)
+ */
+export type ContextHitViaEntity = {
+  id: string;
+  type: string;
+  name: string;
+  relation: string;
+} | null;
+
 export interface ContextHit {
   note: Note;
   score: number;
@@ -126,6 +156,8 @@ export interface ContextHit {
   relation?: string | null;
   /** The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links) */
   viaNoteId?: string | null;
+  /** The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion) */
+  viaEntity?: ContextHitViaEntity;
 }
 
 export interface BuildContextResponse {
@@ -136,3 +168,79 @@ export interface BuildContextResponse {
   bundleMarkdown: string;
   synthesisNote?: Note | null;
 }
+
+export interface GraphEntityRef {
+  id: string;
+  type: string;
+  name: string;
+}
+
+export interface GraphEntityRelation {
+  relation: EntityRelationType;
+  from: GraphEntityRef;
+  to: GraphEntityRef;
+  /** ID of the note this relation was extracted from, if known. Use it to drill into the evidence. */
+  sourceNoteId: string | null;
+  /** Extraction confidence in [0, 1]. */
+  confidence: number;
+  createdAt: string;
+}
+
+export type GraphEntitiesResponseQueryDirection =
+  (typeof GraphEntitiesResponseQueryDirection)[keyof typeof GraphEntitiesResponseQueryDirection];
+
+export const GraphEntitiesResponseQueryDirection = {
+  outgoing: "outgoing",
+  incoming: "incoming",
+  both: "both",
+} as const;
+
+export type GraphEntitiesResponseQuery = {
+  entity: string | null;
+  entityType: string | null;
+  relation: string | null;
+  direction: GraphEntitiesResponseQueryDirection;
+};
+
+export interface GraphEntitiesResponse {
+  query: GraphEntitiesResponseQuery;
+  relations: GraphEntityRelation[];
+}
+
+export type QueryGraphEntitiesParams = {
+  /**
+ * Entity name to anchor the query. Matched case-insensitively against the
+normalized entity name. Required if you want a meaningful "who works at X" answer.
+
+ */
+  entity?: string;
+  /**
+   * Filter the anchor entity by type (e.g. `organization`, `person`).
+   */
+  entityType?: string;
+  /**
+   * Filter by relation type (e.g. `works_at`).
+   */
+  relation?: EntityRelationType;
+  /**
+ * When `entity` is provided, controls which side of the relation it must appear on.
+`outgoing`: entity is the from-side ("X works_at ?"). `incoming`: entity is the to-side
+("? works_at X"). `both` (default): either side. Ignored when `entity` is omitted.
+
+ */
+  direction?: QueryGraphEntitiesDirection;
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  limit?: number;
+};
+
+export type QueryGraphEntitiesDirection =
+  (typeof QueryGraphEntitiesDirection)[keyof typeof QueryGraphEntitiesDirection];
+
+export const QueryGraphEntitiesDirection = {
+  outgoing: "outgoing",
+  incoming: "incoming",
+  both: "both",
+} as const;

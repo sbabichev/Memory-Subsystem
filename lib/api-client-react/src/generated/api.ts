@@ -20,10 +20,12 @@ import type {
   BuildContextRequest,
   BuildContextResponse,
   ErrorResponse,
+  GraphEntitiesResponse,
   HealthStatus,
   IngestTextRequest,
   IngestTextResponse,
   Note,
+  QueryGraphEntitiesParams,
   SearchRequest,
   SearchResponse,
 } from "./api.schemas";
@@ -360,6 +362,108 @@ export const useSearchNotes = <
 > => {
   return useMutation(getSearchNotesMutationOptions(options));
 };
+
+/**
+ * Returns entity relations (e.g. `works_at`, `attended`) scoped to the caller's tenant.
+Use this to answer questions like "who works at Replit?" or "who attended MIT?" without
+going through buildContext. All filters are optional; with no filters, returns the most
+recent/highest-confidence relations for the tenant.
+
+ * @summary Query typed entity↔entity relations directly from the knowledge graph
+ */
+export const getQueryGraphEntitiesUrl = (params?: QueryGraphEntitiesParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/graph/entities?${stringifiedParams}`
+    : `/api/graph/entities`;
+};
+
+export const queryGraphEntities = async (
+  params?: QueryGraphEntitiesParams,
+  options?: RequestInit,
+): Promise<GraphEntitiesResponse> => {
+  return customFetch<GraphEntitiesResponse>(getQueryGraphEntitiesUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getQueryGraphEntitiesQueryKey = (
+  params?: QueryGraphEntitiesParams,
+) => {
+  return [`/api/graph/entities`, ...(params ? [params] : [])] as const;
+};
+
+export const getQueryGraphEntitiesQueryOptions = <
+  TData = Awaited<ReturnType<typeof queryGraphEntities>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: QueryGraphEntitiesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof queryGraphEntities>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getQueryGraphEntitiesQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof queryGraphEntities>>
+  > = ({ signal }) => queryGraphEntities(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof queryGraphEntities>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type QueryGraphEntitiesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof queryGraphEntities>>
+>;
+export type QueryGraphEntitiesQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Query typed entity↔entity relations directly from the knowledge graph
+ */
+
+export function useQueryGraphEntities<
+  TData = Awaited<ReturnType<typeof queryGraphEntities>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: QueryGraphEntitiesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof queryGraphEntities>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getQueryGraphEntitiesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
 
 /**
  * @summary Build a context bundle for a downstream agent

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ContextHitVia } from "./contextHitVia";
+import type { ContextHitViaEntity } from "./contextHitViaEntity";
 import type { Note } from "./note";
 
 export interface ContextHit {
@@ -18,10 +19,5 @@ export interface ContextHit {
   /** The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links) */
   viaNoteId?: string | null;
   /** The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion) */
-  viaEntity?: {
-    id: string;
-    type: string;
-    name: string;
-    relation: string;
-  } | null;
+  viaEntity?: ContextHitViaEntity;
 }

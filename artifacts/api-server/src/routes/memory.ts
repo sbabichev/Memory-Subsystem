@@ -4,12 +4,14 @@ import {
   GetNoteParams,
   SearchNotesBody,
   BuildContextBody,
+  QueryGraphEntitiesQueryParams,
 } from "@workspace/api-zod";
 import { ZodError } from "zod";
 import {
   buildContext,
   fetchNote,
   ingestText,
+  queryGraphEntities,
   searchNotes,
 } from "../memory/services";
 import { logger } from "../lib/logger";
@@ -57,6 +59,16 @@ router.post("/search", async (req, res) => {
   try {
     const body = SearchNotesBody.parse(req.body);
     const out = await searchNotes(body, getTenantSlug(res));
+    res.json(out);
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+router.get("/graph/entities", async (req, res) => {
+  try {
+    const params = QueryGraphEntitiesQueryParams.parse(req.query);
+    const out = await queryGraphEntities(params, getTenantSlug(res));
     res.json(out);
   } catch (err) {
     handleError(res, err);
