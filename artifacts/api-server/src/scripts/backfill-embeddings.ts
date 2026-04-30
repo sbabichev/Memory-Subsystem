@@ -9,7 +9,7 @@
  * between batches, backs off 4× on Voyage 429/5xx.
  */
 import { db, notes } from "@workspace/db";
-import { and, asc, gt, isNull, or, eq, sql } from "drizzle-orm";
+import { and, asc, gt, or, eq, sql } from "drizzle-orm";
 import { embedBatch } from "../memory/voyage-client.js";
 import { logger } from "../lib/logger.js";
 
@@ -29,7 +29,7 @@ async function main() {
   const [countRow] = await db
     .select({ count: sql<number>`count(*)` })
     .from(notes)
-    .where(isNull(notes.embedding));
+    .where(sql`"embedding" IS NULL`);
   const total = Number(countRow.count);
 
   logger.info({ total }, "backfill: starting embedding backfill");
@@ -43,10 +43,10 @@ async function main() {
   while (true) {
     let whereClause;
     if (cursorCreatedAt === null || cursorId === null) {
-      whereClause = isNull(notes.embedding);
+      whereClause = sql`"embedding" IS NULL`;
     } else {
       whereClause = and(
-        isNull(notes.embedding),
+        sql`"embedding" IS NULL`,
         or(
           gt(notes.createdAt, cursorCreatedAt),
           and(

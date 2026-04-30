@@ -76,7 +76,12 @@ export const notes = pgTable(
     }),
     markdownPath: text("markdown_path"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    embedding: vector("embedding", { dimensions: 1024 }),
+    // `embedding vector(1024)` is intentionally omitted from this schema.
+    // The column requires the pgvector extension which must be enabled before
+    // the column can be created. Replit's migration validator runs before
+    // CREATE EXTENSION can execute, so managing this column via drizzle-kit
+    // would always fail on a fresh prod DB. The column is created idempotently
+    // by lib/db/scripts/setup-pgvector.ts (runs as part of the build step).
     searchVector: tsvector("search_vector").generatedAlwaysAs(
       sql`to_tsvector('english', coalesce(title,'') || ' ' || coalesce(body,'') || ' ' || coalesce(summary,''))`,
     ),

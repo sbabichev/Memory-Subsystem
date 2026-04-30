@@ -229,7 +229,7 @@ async function testIngestSucceedsWhenVoyageFails() {
 
   const { ingestText } = await import("../services.js");
   const { db, notes } = await import("@workspace/db");
-  const { eq } = await import("drizzle-orm");
+  const { eq, sql } = await import("drizzle-orm");
 
   const RUN_ID = Date.now().toString(36);
   const testSlug = `ingest-failure-test-${RUN_ID}`;
@@ -248,7 +248,7 @@ async function testIngestSucceedsWhenVoyageFails() {
 
   // Verify embedding IS NULL for the created notes (Voyage failed)
   for (const note of result.notes) {
-    const [row] = await db.select({ embedding: notes.embedding }).from(notes).where(eq(notes.id, note.id)).limit(1);
+    const [row] = await db.select({ embedding: sql<string | null>`"embedding"` }).from(notes).where(eq(notes.id, note.id)).limit(1);
     assert.equal(row?.embedding, null, `Note ${note.id} must have embedding = NULL when Voyage fails`);
   }
 

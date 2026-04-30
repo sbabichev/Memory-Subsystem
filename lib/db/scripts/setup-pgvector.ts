@@ -31,7 +31,11 @@ async function run() {
     await client.query("CREATE EXTENSION IF NOT EXISTS vector");
     console.log("  ✓ pgvector extension enabled");
 
-    // 2. Verify embedding column exists (should be added by drizzle-kit push)
+    // 2. Create embedding column if it doesn't exist.
+    //    The column uses the vector type which requires pgvector (step 1 above).
+    //    It is intentionally excluded from the drizzle schema so that Replit's
+    //    deploy migration validator (which runs before CREATE EXTENSION) never
+    //    tries to create it.
     const { rows: colRows } = await client.query<{ exists: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM information_schema.columns
@@ -39,12 +43,12 @@ async function run() {
        ) AS exists`,
     );
     if (!colRows[0].exists) {
-      console.error(
-        "  ✗ notes.embedding column not found. Run `pnpm --filter @workspace/db run push-force` first.",
-      );
-      process.exit(1);
+      console.log("  Adding notes.embedding vector(1024) column...");
+      await client.query(`ALTER TABLE notes ADD COLUMN embedding vector(1024)`);
+      console.log("  ✓ notes.embedding column created");
+    } else {
+      console.log("  ✓ notes.embedding column exists");
     }
-    console.log("  ✓ notes.embedding column exists");
 
     // 3. Create HNSW cosine index (idempotent)
     const { rows: idxRows } = await client.query<{ exists: boolean }>(

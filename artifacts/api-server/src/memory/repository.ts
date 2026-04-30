@@ -8,7 +8,7 @@ import {
   entityRelations,
   tenants,
 } from "@workspace/db";
-import { and, eq, inArray, not, or, sql, desc, isNull } from "drizzle-orm";
+import { and, eq, inArray, not, or, sql, desc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -128,10 +128,9 @@ export async function setNoteEmbedding(
   embedding: number[],
 ): Promise<void> {
   const vectorLiteral = `[${embedding.join(",")}]`;
-  await db
-    .update(notes)
-    .set({ embedding: sql.raw(`'${vectorLiteral}'::vector`) as unknown as number[] })
-    .where(and(eq(notes.id, noteId), eq(notes.tenantId, tenantId)));
+  await db.execute(
+    sql`UPDATE notes SET embedding = ${sql.raw(`'${vectorLiteral}'::vector`)} WHERE id = ${noteId}::uuid AND tenant_id = ${tenantId}::uuid`,
+  );
 }
 
 export async function setNoteMarkdownPath(
@@ -778,7 +777,7 @@ export async function semanticSearch(
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
   const whereParts = [
     eq(notes.tenantId, opts.tenantId),
-    sql`${notes.embedding} IS NOT NULL`,
+    sql`"embedding" IS NOT NULL`,
   ];
   if (opts.types && opts.types.length > 0) {
     whereParts.push(inArray(notes.type, opts.types));
@@ -787,7 +786,7 @@ export async function semanticSearch(
   const rows = await db
     .select({
       note: notes,
-      distance: sql<number>`${notes.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)}`.as("distance"),
+      distance: sql<number>`"embedding" <=> ${sql.raw(`'${vectorLiteral}'::vector`)}`.as("distance"),
     })
     .from(notes)
     .where(and(...whereParts))
@@ -975,7 +974,7 @@ export async function getNotesWithNullEmbedding(
       summary: notes.summary,
     })
     .from(notes)
-    .where(isNull(notes.embedding))
+    .where(sql`"embedding" IS NULL`)
     .orderBy(notes.createdAt)
     .limit(limit)
     .offset(offset);
