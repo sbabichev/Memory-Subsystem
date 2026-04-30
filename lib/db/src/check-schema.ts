@@ -2,7 +2,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-const REQUIRED_TABLES = ["tenants", "raw_items", "notes", "entities", "note_entities", "note_links"];
+const REQUIRED_TABLES = ["tenants", "raw_items", "notes", "entities", "note_entities", "note_links", "entity_relations"];
 
 export type SchemaCheckResult =
   | { ok: true }

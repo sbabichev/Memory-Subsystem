@@ -17,4 +17,11 @@ export interface ContextHit {
   relation?: string | null;
   /** The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links) */
   viaNoteId?: string | null;
+  /** The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion) */
+  viaEntity?: {
+    id: string;
+    type: string;
+    name: string;
+    relation: string;
+  } | null;
 }

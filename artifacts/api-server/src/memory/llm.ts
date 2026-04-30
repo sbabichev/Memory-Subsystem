@@ -21,6 +21,29 @@ export type ExtractedEntity = {
   name: string;
 };
 
+export const ENTITY_RELATION_TYPES = [
+  "works_at",
+  "attended",
+  "lives_in",
+  "located_in",
+  "friend_of",
+  "family_of",
+  "colleague_of",
+  "member_of",
+  "created_by",
+  "part_of",
+  "mentions",
+] as const;
+
+export type EntityRelationType = (typeof ENTITY_RELATION_TYPES)[number];
+
+export type ExtractedEntityRelation = {
+  fromEntityId: string;
+  toEntityId: string;
+  relation: EntityRelationType;
+  confidence: number;
+};
+
 export const NOTE_RELATION_TYPES = [
   "mentions_same_person",
   "same_event",
@@ -65,6 +88,20 @@ export interface LLMClient {
   extractNoteRelations(
     notes: NoteRelationCandidate[],
   ): Promise<ExtractedNoteRelation[]>;
+  /**
+   * Given note text and its extracted entities (with IDs), identify typed
+   * directed relationships between those entities.
+   * Whitelist: works_at, attended, lives_in, located_in, friend_of,
+   *   family_of, colleague_of, member_of, created_by, part_of, mentions.
+   * Returns only pairs where confidence >= 0.5.
+   *
+   * Extracted so future note-update flows can call `buildAndPersistEntityRelations`
+   * without duplicating logic.
+   */
+  extractEntityRelations(input: {
+    noteText: string;
+    entities: { id: string; type: string; name: string }[];
+  }): Promise<ExtractedEntityRelation[]>;
 }
 
 function tryParseJson<T>(raw: string): T | null {
@@ -270,6 +307,73 @@ ${noteList}`;
       return [];
     }
   }
+
+  async extractEntityRelations(input: {
+    noteText: string;
+    entities: { id: string; type: string; name: string }[];
+  }): Promise<ExtractedEntityRelation[]> {
+    if (input.entities.length < 2) return [];
+
+    const allowedRelations = ENTITY_RELATION_TYPES.join(", ");
+    const entityList = input.entities
+      .map((e) => `ID: ${e.id}  type: ${e.type}  name: ${e.name}`)
+      .join("\n");
+
+    const prompt = `You are extracting typed directed relationships between named entities found in a text.
+
+Entities:
+${entityList}
+
+Allowed relation types: ${allowedRelations}
+- works_at: person works at an organization
+- attended: person attended an event or educational institution
+- lives_in: person lives in a place
+- located_in: entity is physically located in a place
+- friend_of: personal friendship between two people
+- family_of: family relationship between two people
+- colleague_of: two people work together
+- member_of: person is a member of a group/organization
+- created_by: product/project was created by a person or organization
+- part_of: entity is a component/part of another
+- mentions: entity explicitly mentions another
+
+For each clear, confident relationship between the listed entities, output a JSON object with:
+- "fromEntityId": id of the source entity
+- "toEntityId": id of the target entity
+- "relation": one of the allowed types
+- "confidence": a number 0.0–1.0
+
+Return ONLY a JSON array. Return [] if no confident relationships exist. Do NOT invent relationships.
+
+TEXT:
+"""
+${input.noteText.slice(0, 1500)}
+"""`;
+
+    try {
+      const raw = await this.generate(prompt);
+      const parsed = tryParseJson<ExtractedEntityRelation[]>(raw);
+      if (!Array.isArray(parsed)) return [];
+      const validEntityIds = new Set(input.entities.map((e) => e.id));
+      const validRelations = new Set<string>(ENTITY_RELATION_TYPES);
+      return parsed.filter(
+        (r) =>
+          r &&
+          typeof r.fromEntityId === "string" &&
+          typeof r.toEntityId === "string" &&
+          validEntityIds.has(r.fromEntityId) &&
+          validEntityIds.has(r.toEntityId) &&
+          r.fromEntityId !== r.toEntityId &&
+          typeof r.relation === "string" &&
+          validRelations.has(r.relation) &&
+          typeof r.confidence === "number" &&
+          r.confidence >= 0.5,
+      );
+    } catch (err) {
+      logger.warn({ err }, "extractEntityRelations (gemini) failed");
+      return [];
+    }
+  }
 }
 
 class StubLLMClient implements LLMClient {
@@ -304,6 +408,12 @@ class StubLLMClient implements LLMClient {
   async extractNoteRelations(
     _notes: NoteRelationCandidate[],
   ): Promise<ExtractedNoteRelation[]> {
+    return [];
+  }
+  async extractEntityRelations(_input: {
+    noteText: string;
+    entities: { id: string; type: string; name: string }[];
+  }): Promise<ExtractedEntityRelation[]> {
     return [];
   }
 }

@@ -5,6 +5,7 @@ import {
   entities,
   noteEntities,
   noteLinks,
+  entityRelations,
   tenants,
 } from "@workspace/db";
 import { and, eq, inArray, or, sql, desc, isNull } from "drizzle-orm";
@@ -192,6 +193,97 @@ export async function linkNoteEntities(
 }
 
 /**
+ * Upsert typed entity↔entity relations, verifying both entities belong to `tenantId`.
+ * Guards against cross-tenant edges.
+ * On conflict (tenantId, fromEntityId, toEntityId, relation): updates confidence to max
+ * and replaces sourceNoteId when incoming confidence is higher.
+ *
+ * NOTE: Reuse this function in future note-update flows via `buildAndPersistEntityRelations`.
+ */
+/** Allowed relation types for entity_relations — keep in sync with ENTITY_RELATION_TYPES in llm.ts */
+const VALID_ENTITY_RELATIONS = new Set([
+  "works_at",
+  "attended",
+  "lives_in",
+  "located_in",
+  "friend_of",
+  "family_of",
+  "colleague_of",
+  "member_of",
+  "created_by",
+  "part_of",
+  "mentions",
+]);
+
+export async function upsertEntityRelations(
+  tx: Executor,
+  tenantId: string,
+  relations: { fromEntityId: string; toEntityId: string; relation: string; confidence: number }[],
+  sourceNoteId: string | null,
+): Promise<void> {
+  if (relations.length === 0) return;
+
+  // Guard 1: filter out any relations with non-whitelisted relation types.
+  const typeFiltered = relations.filter((r) => VALID_ENTITY_RELATIONS.has(r.relation));
+  if (typeFiltered.length === 0) return;
+
+  const allEntityIds = Array.from(
+    new Set(typeFiltered.flatMap((r) => [r.fromEntityId, r.toEntityId])),
+  );
+
+  // Guard 2: verify both endpoint entities belong to this tenant.
+  const verifiedRows = await tx
+    .select({ id: entities.id })
+    .from(entities)
+    .where(and(inArray(entities.id, allEntityIds), eq(entities.tenantId, tenantId)));
+  const verifiedIds = new Set(verifiedRows.map((r) => r.id));
+
+  const safe = typeFiltered.filter(
+    (r) => verifiedIds.has(r.fromEntityId) && verifiedIds.has(r.toEntityId),
+  );
+  if (safe.length === 0) return;
+
+  // Guard 3: if sourceNoteId is provided, verify it belongs to this tenant.
+  // If it doesn't (cross-tenant or non-existent), treat it as null.
+  let safeSourceNoteId = sourceNoteId;
+  if (sourceNoteId !== null) {
+    const noteRow = await tx
+      .select({ id: notes.id })
+      .from(notes)
+      .where(and(eq(notes.id, sourceNoteId), eq(notes.tenantId, tenantId)))
+      .limit(1);
+    if (noteRow.length === 0) {
+      safeSourceNoteId = null;
+    }
+  }
+
+  await tx
+    .insert(entityRelations)
+    .values(
+      safe.map((r) => ({
+        tenantId,
+        fromEntityId: r.fromEntityId,
+        toEntityId: r.toEntityId,
+        relation: r.relation,
+        sourceNoteId: safeSourceNoteId,
+        confidence: r.confidence,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: [
+        entityRelations.tenantId,
+        entityRelations.fromEntityId,
+        entityRelations.toEntityId,
+        entityRelations.relation,
+      ],
+      set: {
+        confidence: sql`GREATEST(${entityRelations.confidence}, EXCLUDED.confidence)`,
+        sourceNoteId: sql`CASE WHEN EXCLUDED.confidence > ${entityRelations.confidence} THEN EXCLUDED.source_note_id ELSE ${entityRelations.sourceNoteId} END`,
+      },
+    });
+}
+
+/**
  * Insert typed note↔note links, verifying both endpoints belong to `tenantId`.
  * Guards against cross-tenant edges even if the caller supplies incorrect IDs.
  * Uses onConflictDoNothing on PK (fromNoteId, toNoteId, relation).
@@ -299,10 +391,12 @@ export async function getNotesByIds(ids: string[], tenantId: string): Promise<No
 
 export type RelatedNoteHit = {
   id: string;
-  /** The typed relation from note_links, or "shared_entity" for entity-overlap expansion */
+  /** The typed relation from note_links, or "shared_entity" for entity-overlap expansion, or entity relation type for graph expansion */
   relation: string;
   /** The seed note ID that this related note was linked from, or null for entity expansion */
   viaNoteId: string | null;
+  /** Set when the note was pulled in via a typed entity↔entity relation (1-hop graph expansion) */
+  viaEntity?: { id: string; type: string; name: string; relation: string } | null;
 };
 
 export async function findRelatedNoteIds(
@@ -391,6 +485,92 @@ export async function findRelatedNoteIds(
     for (const r of sharedRows) {
       if (!linked.has(r.noteId)) {
         linked.set(r.noteId, { id: r.noteId, relation: "shared_entity", viaNoteId: null });
+      }
+    }
+
+    // 1-hop entity-graph expansion via entity_relations.
+    // Find related entities via typed directed relations (both directions),
+    // then find notes that reference those related entities.
+    const entityRelationRows = await db
+      .select({
+        fromEntityId: entityRelations.fromEntityId,
+        toEntityId: entityRelations.toEntityId,
+        relation: entityRelations.relation,
+      })
+      .from(entityRelations)
+      .where(
+        and(
+          eq(entityRelations.tenantId, tenantId),
+          or(
+            inArray(entityRelations.fromEntityId, entityIds),
+            inArray(entityRelations.toEntityId, entityIds),
+          ),
+        ),
+      );
+
+    if (entityRelationRows.length > 0) {
+      // Collect the "far" entities (the ones not in seed entity set) along with relation metadata.
+      const entityIdSet = new Set(entityIds);
+      const relatedEntityMap = new Map<string, { relation: string; seedEntityId: string }>();
+      for (const r of entityRelationRows) {
+        const isSeedFrom = entityIdSet.has(r.fromEntityId);
+        const isSeedTo = entityIdSet.has(r.toEntityId);
+        if (isSeedFrom && !entityIdSet.has(r.toEntityId)) {
+          if (!relatedEntityMap.has(r.toEntityId)) {
+            relatedEntityMap.set(r.toEntityId, { relation: r.relation, seedEntityId: r.fromEntityId });
+          }
+        }
+        if (isSeedTo && !entityIdSet.has(r.fromEntityId)) {
+          if (!relatedEntityMap.has(r.fromEntityId)) {
+            relatedEntityMap.set(r.fromEntityId, { relation: r.relation, seedEntityId: r.toEntityId });
+          }
+        }
+      }
+
+      const relatedEntityIds = Array.from(relatedEntityMap.keys());
+      if (relatedEntityIds.length > 0) {
+        // Fetch metadata for the related entities (verify tenant ownership).
+        const relatedEntityDetails = await db
+          .select({ id: entities.id, type: entities.type, name: entities.name })
+          .from(entities)
+          .where(and(inArray(entities.id, relatedEntityIds), eq(entities.tenantId, tenantId)));
+        const relatedEntityById = new Map(relatedEntityDetails.map((e) => [e.id, e]));
+
+        // Find notes that reference those related entities, scoped to this tenant.
+        const graphExpandedNotes = await db
+          .select({ noteId: noteEntities.noteId, entityId: noteEntities.entityId })
+          .from(noteEntities)
+          .innerJoin(notes, eq(noteEntities.noteId, notes.id))
+          .where(
+            and(
+              inArray(noteEntities.entityId, relatedEntityIds),
+              eq(notes.tenantId, tenantId),
+              sql`${noteEntities.noteId} <> ALL(${sql.raw(
+                `ARRAY[${seedNoteIds.map((id) => `'${id}'::uuid`).join(",")}]`,
+              )})`,
+            ),
+          )
+          .limit(opts.limit * 2);
+
+        for (const r of graphExpandedNotes) {
+          if (!linked.has(r.noteId)) {
+            const relMeta = relatedEntityMap.get(r.entityId);
+            const entityDetail = relatedEntityById.get(r.entityId);
+            if (relMeta && entityDetail) {
+              linked.set(r.noteId, {
+                id: r.noteId,
+                relation: relMeta.relation,
+                viaNoteId: null,
+                viaEntity: {
+                  id: entityDetail.id,
+                  type: entityDetail.type,
+                  name: entityDetail.name,
+                  relation: relMeta.relation,
+                },
+              });
+            }
+          }
+        }
       }
     }
   }

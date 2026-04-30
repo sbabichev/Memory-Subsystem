@@ -8,6 +8,7 @@ import {
   uniqueIndex,
   primaryKey,
   customType,
+  real,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -144,10 +145,45 @@ export const noteLinks = pgTable(
   (t) => [primaryKey({ columns: [t.fromNoteId, t.toNoteId, t.relation] })],
 );
 
+export const entityRelations = pgTable(
+  "entity_relations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    fromEntityId: uuid("from_entity_id")
+      .notNull()
+      .references(() => entities.id, { onDelete: "cascade" }),
+    toEntityId: uuid("to_entity_id")
+      .notNull()
+      .references(() => entities.id, { onDelete: "cascade" }),
+    relation: text("relation").notNull(),
+    sourceNoteId: uuid("source_note_id").references(() => notes.id, {
+      onDelete: "set null",
+    }),
+    confidence: real("confidence").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("entity_relations_unique_idx").on(
+      t.tenantId,
+      t.fromEntityId,
+      t.toEntityId,
+      t.relation,
+    ),
+    index("entity_relations_from_idx").on(t.tenantId, t.fromEntityId),
+    index("entity_relations_to_idx").on(t.tenantId, t.toEntityId),
+  ],
+);
+
 export type Tenant = typeof tenants.$inferSelect;
 export type RawItem = typeof rawItems.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type Entity = typeof entities.$inferSelect;
+export type EntityRelation = typeof entityRelations.$inferSelect;
 
 import { createInsertSchema } from "drizzle-zod";
 
@@ -157,3 +193,4 @@ export const insertNoteSchema = createInsertSchema(notes);
 export const insertEntitySchema = createInsertSchema(entities);
 export const insertNoteEntitySchema = createInsertSchema(noteEntities);
 export const insertNoteLinkSchema = createInsertSchema(noteLinks);
+export const insertEntityRelationSchema = createInsertSchema(entityRelations);

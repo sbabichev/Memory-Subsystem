@@ -13,6 +13,7 @@ import {
   setNoteMarkdownPath,
   setNoteEmbedding,
   upsertEntities,
+  upsertEntityRelations,
   type NoteWithEntities,
 } from "./repository";
 import { getRetriever } from "./retriever";
@@ -144,6 +145,44 @@ async function buildAndPersistNoteLinks(
   }
 }
 
+/**
+ * Extract typed entity↔entity relations from a note and persist them.
+ *
+ * This function is intentionally extracted so that future note-update flows
+ * can call it without duplicating logic. To reuse: call
+ * `buildAndPersistEntityRelations(tx, tenantId, note, entities, llm)` after
+ * updating a note's body/entities.
+ *
+ * @param tx       - drizzle transaction or db instance
+ * @param tenantId - the tenant that owns the note and entities
+ * @param note     - the note (needs id and body)
+ * @param ents     - resolved entities for this note (with IDs)
+ * @param llm      - LLM client (injected so callers can override)
+ */
+export async function buildAndPersistEntityRelations(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0] | typeof db,
+  tenantId: string,
+  note: { id: string; body: string },
+  ents: { id: string; type: string; name: string }[],
+  llm: LLMClient,
+): Promise<void> {
+  if (ents.length < 2) return;
+  try {
+    const extracted = await llm.extractEntityRelations({
+      noteText: note.body,
+      entities: ents,
+    });
+    if (extracted.length === 0) return;
+    await upsertEntityRelations(tx, tenantId, extracted, note.id);
+    logger.info(
+      { tenantId, noteId: note.id, count: extracted.length },
+      "buildAndPersistEntityRelations: upserted entity relations",
+    );
+  } catch (err) {
+    logger.warn({ err, tenantId, noteId: note.id }, "buildAndPersistEntityRelations: failed, skipping");
+  }
+}
+
 async function embedNoteAfterIngest(
   noteId: string,
   tenantId: string,
@@ -229,6 +268,10 @@ export async function ingestText(
   }
 
   await buildAndPersistNoteLinks(tenantId, persisted.notes, llm);
+
+  for (const n of persisted.notes) {
+    await buildAndPersistEntityRelations(db, tenantId, n, n.entities, llm);
+  }
 
   return {
     rawItemId: persisted.rawId,
@@ -328,6 +371,7 @@ export async function buildContext(
         via: "related" as const,
         relation: meta?.relation,
         viaNoteId: meta?.viaNoteId ?? undefined,
+        viaEntity: meta?.viaEntity ?? undefined,
       };
     }),
   ];

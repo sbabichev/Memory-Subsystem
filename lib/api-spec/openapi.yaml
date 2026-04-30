@@ -280,6 +280,20 @@ components:
           type: string
           nullable: true
           description: "The seed note ID that this related note was linked from (only set when via=related and the hit came from note_links)"
+        viaEntity:
+          nullable: true
+          description: "The entity and typed relation that caused this hit to be included (only set when via=related and the hit was pulled in via entity-graph expansion)"
+          type: object
+          properties:
+            id:
+              type: string
+            type:
+              type: string
+            name:
+              type: string
+            relation:
+              type: string
+          required: [id, type, name, relation]
       required: [note, score, via]
     BuildContextResponse:
       type: object

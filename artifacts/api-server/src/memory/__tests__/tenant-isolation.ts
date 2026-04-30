@@ -6,12 +6,13 @@
  *   2. POST /api/search    (ftsSearch / searchNotes)
  *   3. POST /api/context/build related-note expansion (findRelatedNoteIds / getNotesByIds)
  *   4. Cross-tenant note_links edge (regression: explicit link B→A must not expose A to B)
+ *   5. Cross-tenant entity_relations edge (regression: upsertEntityRelations and graph expansion)
  *
  * Run with: pnpm --filter @workspace/api-server run test:isolation
  */
 
 import assert from "node:assert/strict";
-import { db, tenants, notes, rawItems, entities, noteEntities, noteLinks } from "@workspace/db";
+import { db, tenants, notes, rawItems, entities, noteEntities, noteLinks, entityRelations } from "@workspace/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   ensureTenant,
@@ -20,6 +21,7 @@ import {
   insertNoteLinks,
   linkNoteEntities,
   upsertEntities,
+  upsertEntityRelations,
   getNoteById,
   ftsSearch,
   semanticSearch,
@@ -203,6 +205,94 @@ async function testCrossTenantNoteLinksRegression() {
   console.log("  ✓ cross-tenant note_links edge regression");
 }
 
+async function testEntityRelationsCrossTenantIsolation() {
+  // Create entities in tenant A and tenant B.
+  let entAId = "";
+  let entBId = "";
+
+  await db.transaction(async (tx) => {
+    const entsA = await upsertEntities(tx, tenantAId, [
+      { type: "organization", name: "AcmeCorp" },
+    ]);
+    entAId = entsA[0].id;
+    const entsB = await upsertEntities(tx, tenantBId, [
+      { type: "person", name: "Bob Beta" },
+    ]);
+    entBId = entsB[0].id;
+  });
+
+  // Attempt to upsert an entity relation in tenant B that crosses to tenant A's entity.
+  // upsertEntityRelations should reject it since entAId belongs to tenant A.
+  await db.transaction(async (tx) => {
+    await upsertEntityRelations(
+      tx,
+      tenantBId,
+      [{ fromEntityId: entBId, toEntityId: entAId, relation: "works_at", confidence: 0.9 }],
+      noteBId,
+    );
+  });
+
+  // Verify no cross-tenant edge was persisted.
+  const crossEdges = await db
+    .select()
+    .from(entityRelations)
+    .where(
+      and(
+        eq(entityRelations.fromEntityId, entBId),
+        eq(entityRelations.toEntityId, entAId),
+      ),
+    );
+  assert.equal(
+    crossEdges.length,
+    0,
+    "upsertEntityRelations must NOT persist an edge where toEntityId belongs to a different tenant",
+  );
+  console.log("  ✓ upsertEntityRelations cross-tenant edge rejection");
+
+  // Now create a valid entity relation within tenant A and verify it doesn't
+  // appear when doing graph expansion for tenant B.
+  let entA2Id = "";
+  let noteA2Id = "";
+  await db.transaction(async (tx) => {
+    const entsA2 = await upsertEntities(tx, tenantAId, [
+      { type: "person", name: "Alice Alpha" },
+    ]);
+    entA2Id = entsA2[0].id;
+    // Create a second note in tenant A mentioning Alice Alpha.
+    const nA2 = await insertNote(tx, {
+      tenantId: tenantAId,
+      type: "note",
+      title: "Alice Alpha at AcmeCorp",
+      body: "Alice Alpha works at AcmeCorp.",
+      tags: [],
+    });
+    noteA2Id = nA2.id;
+    await linkNoteEntities(tx, nA2.id, [entA2Id, entAId]);
+    // Create a valid entity relation inside tenant A.
+    await upsertEntityRelations(
+      tx,
+      tenantAId,
+      [{ fromEntityId: entA2Id, toEntityId: entAId, relation: "works_at", confidence: 0.95 }],
+      nA2.id,
+    );
+  });
+
+  // Graph expansion for tenant B seeded with noteBId must NOT return noteA2Id.
+  const related = await findRelatedNoteIds([noteBId], { limit: 20 }, tenantBId);
+  const leaked = related.some((h) => h.id === noteA2Id || h.id === noteAId);
+  assert.equal(
+    leaked,
+    false,
+    "findRelatedNoteIds (entity-graph expansion) must NOT return Tenant A notes when called as Tenant B",
+  );
+  console.log("  ✓ entity-graph expansion cross-tenant isolation");
+
+  // Cleanup extra notes/entities created in this test.
+  if (noteA2Id) {
+    await db.delete(notes).where(eq(notes.id, noteA2Id));
+  }
+}
+
 async function testInsertNoteLinksRejectsCrossTenantEdge() {
   // Regression: insertNoteLinks must not persist edges where one endpoint
   // belongs to a different tenant, even if the LLM hallucinates such a pair.
@@ -233,6 +323,8 @@ async function testInsertNoteLinksRejectsCrossTenantEdge() {
 }
 
 async function cleanup() {
+  // Clean up entity_relations for both tenants first (FK refs entities).
+  await db.delete(entityRelations).where(inArray(entityRelations.tenantId, [tenantAId, tenantBId]));
   const noteIds = [noteAId, noteBId].filter(Boolean);
   if (noteIds.length > 0) {
     await db.delete(notes).where(inArray(notes.id, noteIds));
@@ -253,6 +345,7 @@ async function main() {
     await testSemanticSearchIsolation();
     await testCrossTenantNoteLinksRegression();
     await testInsertNoteLinksRejectsCrossTenantEdge();
+    await testEntityRelationsCrossTenantIsolation();
     console.log("\nAll tenant isolation tests passed.");
   } finally {
     await cleanup();
