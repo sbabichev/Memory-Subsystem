@@ -8,8 +8,8 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "push": "drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "drizzle-kit push --force --config ./drizzle.config.ts",
+    "push": "drizzle-kit push --config ./drizzle.config.internal.ts",
+    "push-force": "drizzle-kit push --force --config ./drizzle.config.internal.ts",
     "migrate": "tsx scripts/migrate-tenants.ts",
     "setup-pgvector": "tsx scripts/setup-pgvector.ts",
     "setup": "tsx scripts/setup.ts"
