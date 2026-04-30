@@ -48,5 +48,7 @@ Thumbs.db
 .cache/
 .local/
 
-# Runtime-generated markdown exports (notes mirror)
+# Runtime-generated markdown exports (notes mirror) — match anywhere in the tree.
+**/.data/notes/
+**/.data/
 .data/notes/
