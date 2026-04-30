@@ -6,6 +6,7 @@ import {
   getNotesByIds,
   findRelatedNoteIds,
   findNotesWithSharedEntities,
+  findOverlappingEntities,
   insertNote,
   insertNoteLinks,
   insertRawItem,
@@ -146,7 +147,20 @@ async function buildAndPersistNoteLinks(
 }
 
 /**
+ * Maximum number of overlapping existing entities to pull in per note when
+ * extracting cross-note entity relations during ingest.
+ */
+const CROSS_NOTE_ENTITY_OVERLAP_LIMIT = 20;
+
+/**
  * Extract typed entity↔entity relations from a note and persist them.
+ *
+ * The `ents` list may include entities from outside the note (e.g. existing
+ * tenant entities whose names overlap with the note's entities). The LLM is
+ * instructed not to invent relationships, so entities not referenced in
+ * `note.body` simply produce no edges. This is how we discover cross-note
+ * entity relations: a name mentioned in the new note may resolve to an entity
+ * created by an earlier note, and a relation between them is then persisted.
  *
  * This function is intentionally extracted so that future note-update flows
  * can call it without duplicating logic. To reuse: call
@@ -156,7 +170,9 @@ async function buildAndPersistNoteLinks(
  * @param tx       - drizzle transaction or db instance
  * @param tenantId - the tenant that owns the note and entities
  * @param note     - the note (needs id and body)
- * @param ents     - resolved entities for this note (with IDs)
+ * @param ents     - candidate entities to consider (note's own + optional
+ *                   overlapping existing entities); all must belong to
+ *                   `tenantId` (verified again by `upsertEntityRelations`)
  * @param llm      - LLM client (injected so callers can override)
  */
 export async function buildAndPersistEntityRelations(
@@ -166,16 +182,19 @@ export async function buildAndPersistEntityRelations(
   ents: { id: string; type: string; name: string }[],
   llm: LLMClient,
 ): Promise<void> {
-  if (ents.length < 2) return;
+  const dedupedEnts = Array.from(
+    new Map(ents.map((e) => [e.id, e])).values(),
+  );
+  if (dedupedEnts.length < 2) return;
   try {
     const extracted = await llm.extractEntityRelations({
       noteText: note.body,
-      entities: ents,
+      entities: dedupedEnts,
     });
     if (extracted.length === 0) return;
     await upsertEntityRelations(tx, tenantId, extracted, note.id);
     logger.info(
-      { tenantId, noteId: note.id, count: extracted.length },
+      { tenantId, noteId: note.id, count: extracted.length, candidateCount: dedupedEnts.length },
       "buildAndPersistEntityRelations: upserted entity relations",
     );
   } catch (err) {
@@ -269,8 +288,30 @@ export async function ingestText(
 
   await buildAndPersistNoteLinks(tenantId, persisted.notes, llm);
 
+  const newNoteEntityIds = new Set(
+    persisted.notes.flatMap((n) => n.entities.map((e) => e.id)),
+  );
   for (const n of persisted.notes) {
-    await buildAndPersistEntityRelations(db, tenantId, n, n.entities, llm);
+    const ownEntityIds = n.entities.map((e) => e.id);
+    let overlapping: { id: string; type: string; name: string }[] = [];
+    try {
+      overlapping = await findOverlappingEntities(
+        tenantId,
+        n.entities.map((e) => ({ type: e.type, name: e.name })),
+        // Exclude both this note's own entities (already in the list) and
+        // any entities created by sibling notes in this same ingest batch
+        // (they have no prior cross-note context to contribute).
+        Array.from(new Set([...ownEntityIds, ...newNoteEntityIds])),
+        { limit: CROSS_NOTE_ENTITY_OVERLAP_LIMIT },
+      );
+    } catch (err) {
+      logger.warn(
+        { err, tenantId, noteId: n.id },
+        "findOverlappingEntities: failed, falling back to within-note entities only",
+      );
+    }
+    const combinedEntities = [...n.entities, ...overlapping];
+    await buildAndPersistEntityRelations(db, tenantId, n, combinedEntities, llm);
   }
 
   return {

@@ -27,6 +27,7 @@ import {
   semanticSearch,
   getNotesByIds,
   findRelatedNoteIds,
+  findOverlappingEntities,
 } from "../repository.js";
 
 const RUN_ID = Date.now().toString(36);
@@ -322,6 +323,134 @@ async function testInsertNoteLinksRejectsCrossTenantEdge() {
   console.log("  ✓ insertNoteLinks cross-tenant edge rejection");
 }
 
+async function testFindOverlappingEntitiesIsolationAndOverlap() {
+  // Seed: tenant A has "Alice Smith" (person) and "Replit" (organization).
+  //       tenant B has "Alice Cooper" (person) and "Bobcat" (person).
+  // Query (as tenant A) with new entities { person: "Alice", organization: "Replit Inc." }
+  // Expectations:
+  //   - Returns Alice Smith (substring overlap "alice" ⊂ "alice smith")
+  //   - Returns Replit (substring overlap "replit" ⊂ "replit inc.")
+  //   - Does NOT return Alice Cooper (belongs to tenant B)
+  //   - Does NOT return Bobcat (belongs to tenant B)
+  //   - Excludes IDs passed in excludeIds
+  let aliceSmithId = "";
+  let replitId = "";
+  let aliceCooperId = "";
+  await db.transaction(async (tx) => {
+    const ents = await upsertEntities(tx, tenantAId, [
+      { type: "person", name: "Alice Smith" },
+      { type: "organization", name: "Replit" },
+    ]);
+    aliceSmithId = ents.find((e) => e.name === "Alice Smith")!.id;
+    replitId = ents.find((e) => e.name === "Replit")!.id;
+  });
+  await db.transaction(async (tx) => {
+    const ents = await upsertEntities(tx, tenantBId, [
+      { type: "person", name: "Alice Cooper" },
+      { type: "person", name: "Bobcat" },
+    ]);
+    aliceCooperId = ents.find((e) => e.name === "Alice Cooper")!.id;
+  });
+
+  const overlapping = await findOverlappingEntities(
+    tenantAId,
+    [
+      { type: "person", name: "Alice" },
+      { type: "organization", name: "Replit Inc." },
+    ],
+    [],
+  );
+  const overlappingIds = new Set(overlapping.map((e) => e.id));
+
+  assert.ok(
+    overlappingIds.has(aliceSmithId),
+    "findOverlappingEntities must return Alice Smith via substring overlap on 'alice'",
+  );
+  assert.ok(
+    overlappingIds.has(replitId),
+    "findOverlappingEntities must return Replit via substring overlap on 'replit'",
+  );
+  assert.equal(
+    overlappingIds.has(aliceCooperId),
+    false,
+    "findOverlappingEntities must NOT return tenant B's Alice Cooper when called as tenant A",
+  );
+
+  // excludeIds should drop Alice Smith from the result.
+  const withExclude = await findOverlappingEntities(
+    tenantAId,
+    [{ type: "person", name: "Alice" }],
+    [aliceSmithId],
+  );
+  assert.equal(
+    withExclude.some((e) => e.id === aliceSmithId),
+    false,
+    "findOverlappingEntities must honor excludeIds",
+  );
+
+  // Type mismatch: querying for organization "Alice" should NOT return person Alice Smith.
+  const typeMismatch = await findOverlappingEntities(
+    tenantAId,
+    [{ type: "organization", name: "Alice" }],
+    [],
+  );
+  assert.equal(
+    typeMismatch.some((e) => e.id === aliceSmithId),
+    false,
+    "findOverlappingEntities must not cross entity types",
+  );
+
+  // Names below minNameLen (default 3) are skipped.
+  const tooShort = await findOverlappingEntities(
+    tenantAId,
+    [{ type: "person", name: "Al" }],
+    [],
+  );
+  assert.equal(
+    tooShort.length,
+    0,
+    "findOverlappingEntities must skip names shorter than minNameLen",
+  );
+
+  // Ordering: exact match wins, then closest length.
+  // Seed two extra person entities so we can verify the ORDER BY picks
+  // the exact match first and the closest-length variant second.
+  let aliceExactId = "";
+  let aliceLongId = "";
+  await db.transaction(async (tx) => {
+    const ents = await upsertEntities(tx, tenantAId, [
+      { type: "person", name: "Alice" },
+      { type: "person", name: "Alice Smith Junior The Third" },
+    ]);
+    aliceExactId = ents.find((e) => e.name === "Alice")!.id;
+    aliceLongId = ents.find((e) => e.name === "Alice Smith Junior The Third")!.id;
+  });
+
+  const ordered = await findOverlappingEntities(
+    tenantAId,
+    [{ type: "person", name: "Alice" }],
+    [],
+    { limit: 10 },
+  );
+  // Expected order: Alice (exact, score 0), then by length-diff: Alice Smith
+  // (closest), Alice Smith Junior The Third (farthest).
+  const orderedIds = ordered.map((e) => e.id);
+  assert.equal(
+    orderedIds[0],
+    aliceExactId,
+    "findOverlappingEntities must rank exact match first",
+  );
+  const exactIdx = orderedIds.indexOf(aliceExactId);
+  const smithIdx = orderedIds.indexOf(aliceSmithId);
+  const longIdx = orderedIds.indexOf(aliceLongId);
+  assert.ok(
+    exactIdx < smithIdx && smithIdx < longIdx,
+    `expected order Alice < Alice Smith < Alice Smith Junior The Third, got [${orderedIds.join(", ")}]`,
+  );
+
+  console.log("  ✓ findOverlappingEntities tenant isolation, overlap, type, exclude, min-length, ordering");
+}
+
 async function cleanup() {
   // Clean up entity_relations for both tenants first (FK refs entities).
   await db.delete(entityRelations).where(inArray(entityRelations.tenantId, [tenantAId, tenantBId]));
@@ -346,6 +475,7 @@ async function main() {
     await testCrossTenantNoteLinksRegression();
     await testInsertNoteLinksRejectsCrossTenantEdge();
     await testEntityRelationsCrossTenantIsolation();
+    await testFindOverlappingEntitiesIsolationAndOverlap();
     console.log("\nAll tenant isolation tests passed.");
   } finally {
     await cleanup();

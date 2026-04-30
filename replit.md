@@ -9,14 +9,15 @@ A modular memory subsystem for an AI-oriented architecture. Ingests text, classi
 - **Markdown export** at `./.data/notes/` is a human-readable mirror, not the source of truth.
 - **Hybrid retrieval**: default mode uses Reciprocal Rank Fusion (RRF k=60) over Postgres FTS + Voyage AI semantic embeddings (`voyage-4-large`, 1024 dims). Fallback to lexical-only if `VOYAGE_API_KEY` is absent.
 - **LLM**: Gemini via the Replit AI Integrations proxy (`@workspace/integrations-gemini-ai`).
-  - Always-on: `classifyNotes`, `extractEntities`.
+  - Always-on: `classifyNotes`, `extractEntities`, `extractEntityRelations`, `extractNoteRelations`.
   - Gated by env flags (default OFF): `MEMORY_LLM_INTERPRET_QUERY`, `MEMORY_LLM_SYNTHESIZE`.
   - Model: `MEMORY_LLM_MODEL` (default `gemini-2.5-flash`).
+- **Knowledge graph**: typed entity↔entity edges (`entity_relations`) and typed note↔note links (`note_links`) are extracted at ingest. Entity-relation extraction is **cross-note**: when ingesting a new note, existing tenant entities whose names overlap with the new note's entities (substring match on the same type) are added to the candidate list passed to the LLM, so a name mentioned in the new text can resolve to an entity created by an earlier note (e.g. "Alice" in note B → "Alice Smith" entity from note A → `works_at Replit`).
 - **Embeddings**: Voyage AI (`VOYAGE_API_KEY` required). Each note is embedded at ingest time with `document` input type; queries use `query` input type.
 
 ## Components
 
-- `lib/db/src/schema/memory.ts` — Drizzle schema: `raw_items`, `notes` (tsvector GIN index + `vector(1024)` HNSW cosine index), `entities`, `note_entities`, `note_links`.
+- `lib/db/src/schema/memory.ts` — Drizzle schema: `raw_items`, `notes` (tsvector GIN index + `vector(1024)` HNSW cosine index), `entities`, `note_entities`, `note_links`, `entity_relations`.
 - `lib/integrations-gemini-ai/` — Gemini client wrapper.
 - `lib/api-spec/openapi.yaml` — OpenAPI 3.1 contract; codegen produces Zod schemas (`@workspace/api-zod`) and React Query hooks (`@workspace/api-client-react`).
 - `artifacts/api-server/src/memory/` — `llm.ts`, `repository.ts`, `retriever.ts`, `markdownStore.ts`, `services.ts`, `voyage-client.ts`.

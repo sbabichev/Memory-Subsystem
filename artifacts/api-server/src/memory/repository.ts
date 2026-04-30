@@ -8,7 +8,7 @@ import {
   entityRelations,
   tenants,
 } from "@workspace/db";
-import { and, eq, inArray, or, sql, desc, isNull } from "drizzle-orm";
+import { and, eq, inArray, not, or, sql, desc, isNull } from "drizzle-orm";
 
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Executor = typeof db | Tx;
@@ -576,6 +576,107 @@ export async function findRelatedNoteIds(
   }
 
   return Array.from(linked.values()).slice(0, opts.limit);
+}
+
+/**
+ * Find existing entities in a tenant whose normalized names overlap with any
+ * of the given new entities. Used during ingest to expand the entity universe
+ * passed to `extractEntityRelations`, so that cross-note edges (entities that
+ * appeared in earlier notes but are also referenced by the current note text)
+ * can be discovered.
+ *
+ * Matching rules per (type, name) pair:
+ *   - Same type
+ *   - Either: existing.normalizedName contains the new normalized name, or
+ *     the new normalized name contains existing.normalizedName (substring,
+ *     case-insensitive on the already-normalized lowercase form).
+ *
+ * Ordering (best matches first, before applying `limit`):
+ *   1. Exact normalized-name matches
+ *   2. Shortest absolute length difference between existing.normalizedName
+ *      and the closest new name (closer alias wins)
+ *
+ * Names shorter than `minNameLen` (default 3) are skipped to suppress noise
+ * from very short tokens like "an" / "of". Cross-tenant entities are excluded
+ * by the tenantId filter. Results are capped by `limit`.
+ *
+ * NOTE: substring matching may produce false positives (e.g. "Bob" overlaps
+ * with "Bobcat"). The downstream LLM call is guarded by a "do not invent
+ * relationships" prompt and a confidence threshold, so spurious additions are
+ * filtered out before persistence. The ordering above ensures the best
+ * candidates win when many partial matches compete for the limit.
+ */
+export async function findOverlappingEntities(
+  tenantId: string,
+  newEntities: { type: string; name: string }[],
+  excludeIds: string[],
+  opts?: { limit?: number; minNameLen?: number },
+): Promise<{ id: string; type: string; name: string }[]> {
+  if (newEntities.length === 0) return [];
+  const minNameLen = opts?.minNameLen ?? 3;
+  const limit = opts?.limit ?? 20;
+
+  const byType = new Map<string, Set<string>>();
+  const allNorms = new Set<string>();
+  for (const e of newEntities) {
+    const norm = normalizeName(e.name);
+    if (norm.length < minNameLen) continue;
+    const set = byType.get(e.type) ?? new Set<string>();
+    set.add(norm);
+    byType.set(e.type, set);
+    allNorms.add(norm);
+  }
+  if (byType.size === 0) return [];
+
+  const orParts: ReturnType<typeof sql>[] = [];
+  for (const [type, names] of byType) {
+    for (const n of names) {
+      orParts.push(
+        sql`(${entities.type} = ${type} AND (position(${n} in ${entities.normalizedName}) > 0 OR position(${entities.normalizedName} in ${n}) > 0))`,
+      );
+    }
+  }
+
+  // Score: 0 when normalizedName is an exact match for any new normalized name,
+  // 1 otherwise. Used as the primary ORDER BY key so exact matches win.
+  const allNormsArr = Array.from(allNorms);
+  const exactMatchScore = sql<number>`CASE WHEN ${entities.normalizedName} IN (${sql.join(
+    allNormsArr.map((n) => sql`${n}`),
+    sql`, `,
+  )}) THEN 0 ELSE 1 END`.as("exact_match_score");
+
+  // Tiebreaker: minimum absolute length difference between existing
+  // normalizedName and any new normalized name. Smaller is better (closer
+  // alias). Computed via LEAST(...) over the candidate name lengths.
+  const lengthDiffExpr = sql<number>`LEAST(${sql.join(
+    allNormsArr.map(
+      (n) => sql`abs(length(${entities.normalizedName}) - ${n.length})`,
+    ),
+    sql`, `,
+  )})`.as("length_diff");
+
+  const whereParts = [eq(entities.tenantId, tenantId)];
+  const orCombined = or(...orParts);
+  if (orCombined) whereParts.push(orCombined);
+  if (excludeIds.length > 0) {
+    whereParts.push(not(inArray(entities.id, excludeIds)));
+  }
+  whereParts.push(sql`length(${entities.normalizedName}) >= ${minNameLen}`);
+
+  const rows = await db
+    .select({
+      id: entities.id,
+      type: entities.type,
+      name: entities.name,
+      _exactMatchScore: exactMatchScore,
+      _lengthDiff: lengthDiffExpr,
+    })
+    .from(entities)
+    .where(and(...whereParts))
+    .orderBy(sql`exact_match_score`, sql`length_diff`)
+    .limit(limit);
+
+  return rows.map((r) => ({ id: r.id, type: r.type, name: r.name }));
 }
 
 /**
