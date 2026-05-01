@@ -87,7 +87,7 @@ export class HybridRetriever implements Retriever {
     let semanticLatencyMs = 0;
     const t0Fts = Date.now();
     const t0Sem = Date.now();
-    const [ftsHits, semanticHits] = await Promise.all([
+    const [ftsHits, semanticHitsRaw] = await Promise.all([
       ftsSearch(query, { limit: FTS_POOL, types, tenantId }).then((r) => {
         ftsLatencyMs = Date.now() - t0Fts;
         return r;
@@ -95,8 +95,20 @@ export class HybridRetriever implements Retriever {
       semanticSearch(queryEmbedding, { limit: SEMANTIC_POOL, types, tenantId }).then((r) => {
         semanticLatencyMs = Date.now() - t0Sem;
         return r;
+      }).catch((err: unknown) => {
+        // embedding column absent in dev — degrade gracefully to FTS-only
+        const causeMsg = err instanceof Error && err.cause instanceof Error
+          ? err.cause.message
+          : "";
+        const msg = err instanceof Error ? err.message : String(err);
+        if ((causeMsg + msg).includes("does not exist")) {
+          logger.warn("retriever: embedding column missing, semantic search skipped");
+          return [] as import("./repository").SearchHitRow[];
+        }
+        throw err;
       }),
     ]);
+    const semanticHits = semanticHitsRaw;
     const t0Rrf = Date.now();
     const fused = rrfFuse(ftsHits, semanticHits, limit);
     const rrfLatencyMs = Date.now() - t0Rrf;
