@@ -772,12 +772,14 @@ export async function ftsSearch(
 
 export async function semanticSearch(
   queryEmbedding: number[],
-  opts: { limit: number; types?: string[] | null; tenantId: string },
+  opts: { limit: number; types?: string[] | null; tenantId: string; maxDistance?: number },
 ): Promise<SearchHitRow[]> {
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
+  const maxDist = opts.maxDistance ?? 0.65;
   const whereParts = [
     eq(notes.tenantId, opts.tenantId),
     sql`"embedding" IS NOT NULL`,
+    sql`"embedding" <=> ${sql.raw(`'${vectorLiteral}'::vector`)} < ${maxDist}`,
   ];
   if (opts.types && opts.types.length > 0) {
     whereParts.push(inArray(notes.type, opts.types));

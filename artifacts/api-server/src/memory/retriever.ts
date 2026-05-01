@@ -101,6 +101,12 @@ export class HybridRetriever implements Retriever {
     const fused = rrfFuse(ftsHits, semanticHits, limit);
     const rrfLatencyMs = Date.now() - t0Rrf;
 
+    // Drop hits whose RRF score is below 30% of the top scorer.
+    // Prevents low-signal notes from leaking into results when the corpus is small.
+    const topScore = fused.length > 0 ? fused[0].score : 0;
+    const minScore = topScore * 0.30;
+    const filtered = fused.filter((h) => h.score >= minScore);
+
     logger.info(
       {
         mode,
@@ -111,11 +117,13 @@ export class HybridRetriever implements Retriever {
         ftsHits: ftsHits.length,
         semanticHits: semanticHits.length,
         fusedHits: fused.length,
+        filteredHits: filtered.length,
+        minScore,
       },
       "retriever: hybrid search",
     );
 
-    return { hits: fused, effectiveMode: "hybrid" };
+    return { hits: filtered, effectiveMode: "hybrid" };
   }
 }
 
