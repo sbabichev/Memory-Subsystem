@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "export NODE_ENV=development && pnpm --filter @workspace/db run setup && pnpm run build && pnpm run start",
+    "dev": "export NODE_ENV=development && pnpm --filter @workspace/db run setup && pnpm run build && exec node --enable-source-maps ./dist/index.mjs",
     "build": "node ./build.mjs",
-    "start": "node --enable-source-maps ./dist/index.mjs",
+    "start": "exec node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:isolation": "tsx src/memory/__tests__/tenant-isolation.ts",
     "test:unit": "tsx src/memory/__tests__/unit.ts",
