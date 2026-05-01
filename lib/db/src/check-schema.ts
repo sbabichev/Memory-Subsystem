@@ -23,6 +23,49 @@ function getPool(): InstanceType<typeof Pool> {
 }
 
 /**
+ * Ensure the notes.embedding vector column and its HNSW index exist.
+ * Runs only when NODE_ENV=production (dev intentionally skips pgvector objects).
+ * Idempotent — safe to call on every startup.
+ */
+export async function ensureEmbeddingColumn(): Promise<void> {
+  if (process.env.NODE_ENV !== "production") return;
+
+  const client = await getPool().connect();
+  try {
+    const { rows: extRows } = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS exists`,
+    );
+    if (!extRows[0].exists) return; // pgvector not installed, skip
+
+    const { rows: colRows } = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'notes' AND column_name = 'embedding'
+       ) AS exists`,
+    );
+    if (!colRows[0].exists) {
+      await client.query(`ALTER TABLE notes ADD COLUMN embedding vector(1024)`);
+    }
+
+    const { rows: idxRows } = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_indexes
+         WHERE tablename = 'notes' AND indexname = 'notes_embedding_hnsw_idx'
+       ) AS exists`,
+    );
+    if (!idxRows[0].exists) {
+      await client.query(`
+        CREATE INDEX notes_embedding_hnsw_idx
+          ON notes USING hnsw (embedding vector_cosine_ops)
+          WITH (m = 16, ef_construction = 64)
+      `);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Lightweight read-only schema check: verifies that all required tables are
  * present in the public schema.  No DDL side effects.
  *

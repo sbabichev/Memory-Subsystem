@@ -1,6 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { checkSchema } from "@workspace/db";
+import { checkSchema, ensureEmbeddingColumn } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
 
@@ -34,6 +34,9 @@ async function startServer() {
   }
 
   logger.info("Database schema OK.");
+
+  await ensureEmbeddingColumn();
+  logger.info("Embedding column ready.");
 
   await new Promise<void>((resolve, reject) => {
     app.listen(port, (err) => {
