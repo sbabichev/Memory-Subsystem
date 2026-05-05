@@ -794,7 +794,7 @@ export async function semanticSearch(
   opts: { limit: number; types?: string[] | null; tenantId: string; maxDistance?: number },
 ): Promise<SearchHitRow[]> {
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
-  const maxDist = opts.maxDistance ?? 0.65;
+  const maxDist = opts.maxDistance ?? 0.82;
   const whereParts = [
     eq(notes.tenantId, opts.tenantId),
     sql`"embedding" IS NOT NULL`,
