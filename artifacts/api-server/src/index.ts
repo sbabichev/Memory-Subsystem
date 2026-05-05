@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { checkSchema, ensureEmbeddingColumn } from "@workspace/db";
+import { backfillEmbeddings } from "./memory/services";
 
 const rawPort = process.env["PORT"];
 
@@ -49,6 +50,11 @@ async function startServer() {
   });
 
   logger.info({ port }, "Server listening");
+
+  // async backfill — does not block startup
+  backfillEmbeddings().catch((err) =>
+    logger.error({ err }, "backfill-embeddings: unexpected error"),
+  );
 }
 
 startServer().catch((err) => {

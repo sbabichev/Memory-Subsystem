@@ -133,6 +133,25 @@ export async function setNoteEmbedding(
   );
 }
 
+export async function getNotesWithoutEmbedding(
+  limit = 200,
+): Promise<{ id: string; tenantId: string; title: string; body: string; summary: string | null }[]> {
+  const rows = await db.execute<{
+    id: string;
+    tenant_id: string;
+    title: string;
+    body: string;
+    summary: string | null;
+  }>(sql`SELECT id, tenant_id, title, body, summary FROM notes WHERE embedding IS NULL LIMIT ${limit}`);
+  return rows.rows.map((r) => ({
+    id: r.id,
+    tenantId: r.tenant_id,
+    title: r.title,
+    body: r.body,
+    summary: r.summary,
+  }));
+}
+
 export async function setNoteMarkdownPath(
   noteId: string,
   tenantId: string,

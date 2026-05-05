@@ -14,6 +14,7 @@ import {
   queryEntityRelations,
   setNoteMarkdownPath,
   setNoteEmbedding,
+  getNotesWithoutEmbedding,
   upsertEntities,
   upsertEntityRelations,
   type NoteWithEntities,
@@ -218,6 +219,42 @@ async function embedNoteAfterIngest(
   } catch (err) {
     logger.warn({ err, noteId }, "embed-on-ingest: failed to embed note, leaving embedding NULL");
   }
+}
+
+/** Backfill embeddings for all notes that have embedding IS NULL. Runs async at startup. */
+export async function backfillEmbeddings(): Promise<void> {
+  if (!process.env.VOYAGE_API_KEY) return;
+  let notes: Awaited<ReturnType<typeof getNotesWithoutEmbedding>>;
+  try {
+    notes = await getNotesWithoutEmbedding(500);
+  } catch (err) {
+    const msg = (err instanceof Error ? err.message : String(err)) +
+      (err instanceof Error && err.cause instanceof Error ? err.cause.message : "");
+    if (msg.includes("does not exist")) {
+      logger.warn("backfill-embeddings: embedding column not present, skipping");
+      return;
+    }
+    throw err;
+  }
+  if (notes.length === 0) return;
+  logger.info({ count: notes.length }, "backfill-embeddings: starting");
+  let ok = 0;
+  let fail = 0;
+  for (const n of notes) {
+    try {
+      const input = buildEmbeddingInput(n);
+      const result = await embedText(input, "document");
+      await setNoteEmbedding(n.id, n.tenantId, result.embedding);
+      ok++;
+      // small delay to avoid 429 from Voyage
+      await new Promise((r) => setTimeout(r, 300));
+    } catch (err) {
+      fail++;
+      logger.warn({ err, noteId: n.id }, "backfill-embeddings: failed to embed note, skipping");
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  logger.info({ ok, fail }, "backfill-embeddings: complete");
 }
 
 export async function ingestText(
