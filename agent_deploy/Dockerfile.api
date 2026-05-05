@@ -1,0 +1,75 @@
+# =============================================================================
+# Stage 1: Build
+# Installs all dependencies and compiles the TypeScript monorepo into a
+# single bundled JS file using esbuild.
+# =============================================================================
+FROM node:22-alpine AS builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifest files first (maximises layer cache hits)
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+
+# Copy all package.json files so pnpm can resolve the workspace graph
+COPY artifacts/api-server/package.json ./artifacts/api-server/
+COPY lib/db/package.json ./lib/db/
+COPY lib/api-zod/package.json ./lib/api-zod/
+COPY lib/integrations-gemini-ai/package.json ./lib/integrations-gemini-ai/
+
+# Install all workspace dependencies (frozen lockfile for reproducibility)
+RUN pnpm install --frozen-lockfile
+
+# Copy source code for all packages needed by api-server
+COPY lib/ ./lib/
+COPY artifacts/api-server/ ./artifacts/api-server/
+
+# Build the api-server bundle (outputs to artifacts/api-server/dist/)
+RUN pnpm --filter @workspace/api-server run build
+
+# =============================================================================
+# Stage 2: Runtime
+# Production image with all dependencies.
+# We intentionally do NOT use --prod here: the @workspace/db setup scripts
+# (setup.ts, setup-pgvector.ts, migrate-tenants.ts) are executed via `tsx`,
+# which lives in devDependencies of lib/db. Without it, `db-setup.sh` would
+# fail when running `pnpm --filter @workspace/db run setup` inside this container.
+# =============================================================================
+FROM node:22-alpine AS runtime
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifest files
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+
+# Copy package.json files for all workspace packages (full graph required)
+COPY artifacts/api-server/package.json ./artifacts/api-server/
+COPY lib/db/package.json ./lib/db/
+COPY lib/api-zod/package.json ./lib/api-zod/
+COPY lib/api-spec/package.json ./lib/api-spec/
+COPY lib/api-client-react/package.json ./lib/api-client-react/
+COPY lib/integrations-gemini-ai/package.json ./lib/integrations-gemini-ai/
+
+# Install all dependencies (including devDependencies) so db setup scripts work
+RUN pnpm install --frozen-lockfile
+
+# Copy the built bundle from the builder stage
+COPY --from=builder /app/artifacts/api-server/dist ./artifacts/api-server/dist
+
+# db setup scripts are needed for `pnpm --filter @workspace/db run setup`
+COPY lib/db/scripts ./lib/db/scripts
+COPY lib/db/src ./lib/db/src
+COPY lib/db/drizzle.config.internal.ts ./lib/db/
+
+# The server reads PORT at startup and will refuse to start without it
+ENV PORT=3001
+ENV NODE_ENV=production
+
+WORKDIR /app/artifacts/api-server
+
+EXPOSE 3001
+
+CMD ["node", "--enable-source-maps", "./dist/index.mjs"]

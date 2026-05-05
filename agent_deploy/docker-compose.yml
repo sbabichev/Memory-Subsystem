@@ -1,0 +1,78 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL with pgvector extension
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Postgres is not exposed on the host — only reachable within the Docker network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # API Server (Express + Node.js)
+  # ---------------------------------------------------------------------------
+  api-server:
+    build:
+      context: ..
+      dockerfile: agent_deploy/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      MEMORY_API_KEY: ${MEMORY_API_KEY}
+      MEMORY_API_KEYS: ${MEMORY_API_KEYS:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      NODE_ENV: production
+      PORT: 3001
+    # Port 3001 is internal only; nginx routes /api traffic to it
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/api/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Inspector UI (static React app served by nginx)
+  # ---------------------------------------------------------------------------
+  inspector:
+    build:
+      context: ..
+      dockerfile: agent_deploy/Dockerfile.inspector
+      args:
+        BASE_PATH: ${BASE_PATH:-/}
+        VITE_MEMORY_API_KEY: ${VITE_MEMORY_API_KEY}
+    restart: unless-stopped
+    # No external ports — nginx (below) proxies all UI traffic to this container
+
+  # ---------------------------------------------------------------------------
+  # nginx — single public entry point
+  # Port 80: /api → api-server, / → inspector
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - api-server
+      - inspector
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  postgres_data:
